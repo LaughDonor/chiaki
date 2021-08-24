@@ -21,8 +21,12 @@ typedef unsigned short sa_family_t;
 extern "C" {
 #endif
 
-#define CHIAKI_DISCOVERY_PORT 987
-#define CHIAKI_DISCOVERY_PROTOCOL_VERSION "00020020"
+#define CHIAKI_DISCOVERY_PORT_PS4 987
+#define CHIAKI_DISCOVERY_PROTOCOL_VERSION_PS4 "00020020"
+#define CHIAKI_DISCOVERY_PORT_PS5 9302
+#define CHIAKI_DISCOVERY_PROTOCOL_VERSION_PS5 "00030010"
+#define CHIAKI_DISCOVERY_PORT_LOCAL_MIN 9303
+#define CHIAKI_DISCOVERY_PORT_LOCAL_MAX 9319
 
 typedef enum chiaki_discovery_cmd_t
 {
@@ -69,6 +73,9 @@ typedef struct chiaki_discovery_host_t
 #undef STRING_MEMBER
 } ChiakiDiscoveryHost;
 
+CHIAKI_EXPORT bool chiaki_discovery_host_is_ps5(ChiakiDiscoveryHost *host);
+
+CHIAKI_EXPORT ChiakiTarget chiaki_discovery_host_system_version_target(ChiakiDiscoveryHost *host);
 
 CHIAKI_EXPORT int chiaki_discovery_packet_fmt(char *buf, size_t buf_size, ChiakiDiscoveryPacket *packet);
 
@@ -101,7 +108,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_discovery_thread_stop(ChiakiDiscoveryThread
  * Convenience function to send a wakeup packet
  * @param discovery Discovery to send the packet on. May be NULL, in which case a new temporary Discovery will be created
  */
-CHIAKI_EXPORT ChiakiErrorCode chiaki_discovery_wakeup(ChiakiLog *log, ChiakiDiscovery *discovery, const char *host, uint64_t user_credential);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_discovery_wakeup(ChiakiLog *log, ChiakiDiscovery *discovery, const char *host, uint64_t user_credential, bool ps5);
 
 #ifdef __cplusplus
 }

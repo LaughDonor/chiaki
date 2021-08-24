@@ -24,10 +24,11 @@ class SettingsDialog : public QDialog
 		QComboBox *resolution_combo_box;
 		QComboBox *fps_combo_box;
 		QLineEdit *bitrate_edit;
+		QComboBox *codec_combo_box;
 		QLineEdit *audio_buffer_size_edit;
 		QComboBox *audio_device_combo_box;
 		QCheckBox *pi_decoder_check_box;
-		QComboBox *hardware_decode_combo_box;
+		QComboBox *hw_decoder_combo_box;
 
 		QListWidget *registered_hosts_list_widget;
 		QPushButton *delete_registered_host_button;
@@ -41,6 +42,7 @@ class SettingsDialog : public QDialog
 		void ResolutionSelected();
 		void FPSSelected();
 		void BitrateEdited();
+		void CodecSelected();
 		void AudioBufferSizeEdited();
 		void AudioOutputSelected();
 		void HardwareDecodeEngineSelected();

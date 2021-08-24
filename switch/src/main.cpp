@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 // chiaki modules
-#include <chiaki/log.h>
 #include <chiaki/discovery.h>
+#include <chiaki/log.h>
 
 // discover and wakeup ps4 host
 // from local network
 #include "discoverymanager.h"
-#include "settings.h"
-#include "io.h"
 #include "gui.h"
+#include "io.h"
+#include "settings.h"
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -51,19 +51,19 @@ static int s_nxlinkSock = -1;
 static void initNxLink()
 {
 	// use chiaki socket config initialization
-	if (R_FAILED(socketInitialize(&g_chiakiSocketInitConfig)))
+	if(R_FAILED(socketInitialize(&g_chiakiSocketInitConfig)))
 		return;
 
 	s_nxlinkSock = nxlinkStdio();
-	if (s_nxlinkSock >= 0)
-		printf("initNxLink");
+	if(s_nxlinkSock >= 0)
+		printf("initNxLink\n");
 	else
 		socketExit();
 }
 
 static void deinitNxLink()
 {
-	if (s_nxlinkSock >= 0)
+	if(s_nxlinkSock >= 0)
 	{
 		close(s_nxlinkSock);
 		s_nxlinkSock = -1;
@@ -105,52 +105,37 @@ extern "C" void userAppExit()
 }
 #endif // __SWITCH__
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-	// init chiaki lib
-	ChiakiLog log;
-#if defined(__SWITCH__) && !defined(CHIAKI_ENABLE_SWITCH_NXLINK)
-	// null log for switch version
-	chiaki_log_init(&log, 0, chiaki_log_cb_print, NULL);
-#else
-	chiaki_log_init(&log, CHIAKI_LOG_ALL ^ CHIAKI_LOG_VERBOSE, chiaki_log_cb_print, NULL);
-#endif
-
 	// load chiaki lib
-	CHIAKI_LOGI(&log, "Loading chaki lib");
+	Settings *settings = Settings::GetInstance();
+	ChiakiLog *log = settings->GetLogger();
+
+	CHIAKI_LOGI(log, "Loading chaki lib");
 
 	ChiakiErrorCode err = chiaki_lib_init();
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
-		CHIAKI_LOGE(&log, "Chiaki lib init failed: %s\n", chiaki_error_string(err));
+		CHIAKI_LOGE(log, "Chiaki lib init failed: %s\n", chiaki_error_string(err));
 		return 1;
 	}
 
-	CHIAKI_LOGI(&log, "Loading SDL audio / joystick");
-	if(SDL_Init( SDL_INIT_AUDIO | SDL_INIT_JOYSTICK ))
+	CHIAKI_LOGI(log, "Loading SDL audio / joystick / haptic");
+	if(SDL_Init(SDL_INIT_AUDIO | SDL_INIT_JOYSTICK))
 	{
-		CHIAKI_LOGE(&log, "SDL initialization failed: %s", SDL_GetError());
+		CHIAKI_LOGE(log, "SDL initialization failed: %s", SDL_GetError());
 		return 1;
 	}
 
 	// build sdl OpenGl and AV decoders graphical interface
-	IO io = IO(&log); // open Input Output class
+	DiscoveryManager discoverymanager = DiscoveryManager();
+	{
+		// scope to delete MainApplication before SDL_Quit()
+		MainApplication app(&discoverymanager);
+		app.Load();
+	}
 
-	// manage ps4 setting discovery wakeup and registration
-	std::map<std::string, Host> hosts;
-	// create host objects form config file
-	Settings settings = Settings(&log, &hosts);
-	CHIAKI_LOGI(&log, "Read chiaki settings file");
-	// FIXME use GUI for config
-	settings.ParseFile();
-	Host * host = nullptr;
-
-	DiscoveryManager discoverymanager = DiscoveryManager(&settings);
-	MainApplication app = MainApplication(&hosts, &settings, &discoverymanager, &io, &log);
-	app.Load();
-
-	CHIAKI_LOGI(&log, "Quit applet");
+	CHIAKI_LOGI(log, "Quit applet");
 	SDL_Quit();
 	return 0;
 }
-

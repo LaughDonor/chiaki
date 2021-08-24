@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
-#include <chiaki/log.h>
 #include "gui.h"
+#include <chiaki/log.h>
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
@@ -9,38 +9,42 @@
 // TODO
 using namespace brls::i18n::literals; // for _i18n
 
-#define DIALOG(dialog, r) \
-	brls::Dialog* d_##dialog = new brls::Dialog(r); \
-	brls::GenericEvent::Callback cb_##dialog = [d_##dialog](brls::View* view) \
-	{ \
-		d_##dialog->close(); \
-	}; \
-	d_##dialog->addButton("Ok", cb_##dialog); \
-	d_##dialog->setCancelable(false); \
-	d_##dialog->open(); \
+#define DIALOG(dialog, r)                                                       \
+	brls::Dialog *d_##dialog = new brls::Dialog(r);                             \
+	brls::GenericEvent::Callback cb_##dialog = [d_##dialog](brls::View *view) { \
+		d_##dialog->close();                                                    \
+	};                                                                          \
+	d_##dialog->addButton("Ok", cb_##dialog);                                   \
+	d_##dialog->setCancelable(false);                                           \
+	d_##dialog->open();                                                         \
 	brls::Logger::info("Dialog: {0}", r);
 
-
-HostInterface::HostInterface(brls::List * hostList, IO * io, Host * host, Settings * settings)
-	: hostList(hostList), io(io), host(host), settings(settings)
+HostInterface::HostInterface(Host *host)
+	: host(host)
 {
-	brls::ListItem* connect = new brls::ListItem("Connect");
-	connect->getClickEvent()->subscribe(std::bind(&HostInterface::Connect, this, std::placeholders::_1));
-	this->hostList->addView(connect);
+	this->settings = Settings::GetInstance();
+	this->io = IO::GetInstance();
 
-	brls::ListItem* wakeup = new brls::ListItem("Wakeup");
+	brls::ListItem *connect = new brls::ListItem("Connect");
+	connect->getClickEvent()->subscribe(std::bind(&HostInterface::Connect, this, std::placeholders::_1));
+	this->addView(connect);
+
+	brls::ListItem *wakeup = new brls::ListItem("Wakeup");
 	wakeup->getClickEvent()->subscribe(std::bind(&HostInterface::Wakeup, this, std::placeholders::_1));
-	this->hostList->addView(wakeup);
+	this->addView(wakeup);
 
 	// message delimiter
-	brls::Label* info = new brls::Label(brls::LabelStyle::REGULAR,
-			"Host configuration", true);
-	this->hostList->addView(info);
+	brls::Label *info = new brls::Label(brls::LabelStyle::REGULAR,
+		"Host configuration", true);
+	this->addView(info);
 
 	// push opengl chiaki stream
 	// when the host is connected
-	this->io->SetEventConnectedCallback(std::bind(&HostInterface::Stream, this));
-	this->io->SetEventQuitCallback(std::bind(&HostInterface::CloseStream, this, std::placeholders::_1));
+	this->host->SetEventConnectedCallback(std::bind(&HostInterface::Stream, this));
+	this->host->SetEventQuitCallback(std::bind(&HostInterface::CloseStream, this, std::placeholders::_1));
+	// allow host to update controller state
+	this->host->SetEventRumbleCallback(std::bind(&IO::SetRumble, this->io, std::placeholders::_1, std::placeholders::_2));
+	this->host->SetReadControllerCallback(std::bind(&IO::UpdateControllerState, this->io, std::placeholders::_1, std::placeholders::_2));
 }
 
 HostInterface::~HostInterface()
@@ -48,127 +52,129 @@ HostInterface::~HostInterface()
 	Disconnect();
 }
 
-void HostInterface::Register(bool pin_incorrect)
+void HostInterface::Register(Host *host, std::function<void()> success_cb)
 {
-	if(pin_incorrect)
+	Settings *settings = Settings::GetInstance();
+	IO *io = IO::GetInstance();
+
+	// user must provide psn id for registration
+	std::string account_id = settings->GetPSNAccountID(host);
+	std::string online_id = settings->GetPSNOnlineID(host);
+	ChiakiTarget target = host->GetChiakiTarget();
+
+	if(target >= CHIAKI_TARGET_PS4_9 && account_id.length() <= 0)
 	{
-		DIALOG(srfpvyps, "Session Registration Failed, Please verify your PS4 settings");
+		// PS4 firmware > 7.0
+		DIALOG(upaid, "Undefined PSN Account ID (Please configure a valid psn_account_id)");
+		return;
+	}
+	else if(target < CHIAKI_TARGET_PS4_9 && online_id.length() <= 0)
+	{
+		// use oline ID for ps4 < 7.0
+		DIALOG(upoid, "Undefined PSN Online ID (Please configure a valid psn_online_id)");
 		return;
 	}
 
-	// the host is not registered yet
-	brls::Dialog* peprpc = new brls::Dialog("Please enter your PS4 registration PIN code");
-	brls::GenericEvent::Callback cb_peprpc = [this, peprpc](brls::View* view)
-	{
-		bool pin_provided = false;
-		char pin_input[9] = {0};
-		std::string error_message;
-
-		// use callback to ensure that the message is showed on screen
-		// before the the ReadUserKeyboard
-		peprpc->close();
-
-		pin_provided = this->io->ReadUserKeyboard(pin_input, sizeof(pin_input));
-		if(pin_provided)
+	// add HostConnected function to regist_event_type_finished_success
+	auto event_type_finished_success_cb = [settings, success_cb]() {
+		// save RP keys
+		settings->WriteFile();
+		if(success_cb != nullptr)
 		{
-			// prevent users form messing with the gui
-			brls::Application::blockInputs();
-			int ret = this->host->Register(pin_input);
-			if(ret != HOST_REGISTER_OK)
+			// FIXME: may raise a connection refused
+			// when the connection is triggered
+			// just after the register success
+			sleep(2);
+			success_cb();
+		}
+		// decrement block input token number
+		brls::Application::unblockInputs();
+	};
+	host->SetRegistEventTypeFinishedSuccess(event_type_finished_success_cb);
+
+	auto event_type_finished_failed_cb = []() {
+		// unlock user inputs
+		brls::Application::unblockInputs();
+		brls::Application::notify("Registration failed");
+	};
+	host->SetRegistEventTypeFinishedFailed(event_type_finished_failed_cb);
+
+	// the host is not registered yet
+	// use callback to ensure that the message is showed on screen
+	// before the Swkbd
+	auto pin_input_cb = [host](int pin) {
+		// prevent users form messing with the gui
+		brls::Application::blockInputs();
+		int ret = host->Register(pin);
+		if(ret != HOST_REGISTER_OK)
+		{
+			switch(ret)
 			{
-				switch(ret)
-				{
-					// account not configured
-					case HOST_REGISTER_ERROR_SETTING_PSNACCOUNTID:
-						brls::Application::notify("No PSN Account ID provided");
-						brls::Application::unblockInputs();
-						break;
-					case HOST_REGISTER_ERROR_SETTING_PSNONLINEID:
-						brls::Application::notify("No PSN Online ID provided");
-						brls::Application::unblockInputs();
-						break;
-				}
+				// account not configured
+				case HOST_REGISTER_ERROR_SETTING_PSNACCOUNTID:
+					brls::Application::notify("No PSN Account ID provided");
+					brls::Application::unblockInputs();
+					break;
+				case HOST_REGISTER_ERROR_SETTING_PSNONLINEID:
+					brls::Application::notify("No PSN Online ID provided");
+					brls::Application::unblockInputs();
+					break;
 			}
 		}
 	};
-	peprpc->addButton("Ok", cb_peprpc);
-	peprpc->setCancelable(false);
-	peprpc->open();
+	// the pin is 8 digit
+	bool success = brls::Swkbd::openForNumber(pin_input_cb,
+		"Please enter your PlayStation registration PIN code", "8 digits without spaces", 8, "", "", "");
 }
 
-void HostInterface::Wakeup(brls::View * view)
+void HostInterface::Register()
 {
-	if(!this->host->rp_key_data)
+	// use Connect just after the registration to save user inputs
+	HostInterface::Register(this->host, std::bind(&HostInterface::ConnectSession, this));
+}
+
+void HostInterface::Wakeup(brls::View *view)
+{
+	if(!this->host->HasRPkey())
 	{
 		// the host is not registered yet
-		DIALOG(prypf, "Please register your PS4 first");
+		DIALOG(prypf, "Please register your PlayStation first");
 	}
 	else
 	{
 		int r = host->Wakeup();
 		if(r == 0)
 		{
-			brls::Application::notify("PS4 Wakeup packet sent");
+			brls::Application::notify("PlayStation Wakeup packet sent");
 		}
 		else
 		{
-			brls::Application::notify("PS4 Wakeup packet failed");
+			brls::Application::notify("PlayStation Wakeup packet failed");
 		}
 	}
 }
 
-void HostInterface::Connect(brls::View * view)
+void HostInterface::Connect(brls::View *view)
 {
 	// check that all requirements are met
-	if(this->host->state != CHIAKI_DISCOVERY_HOST_STATE_READY)
+	if(!this->host->IsDiscovered() && !this->host->HasRPkey())
+	{
+		// at this point the host must be discovered or registered manually
+		// to validate the system_version accuracy
+		brls::Application::crash("Undefined PlayStation remote version");
+	}
+
+	// ignore state for remote hosts
+	if(this->host->IsDiscovered() && !this->host->IsReady())
 	{
 		// host in standby mode
-		DIALOG(ptoyp, "Please turn on your PS4");
+		DIALOG(ptoyp, "Please turn on your PlayStation");
 		return;
 	}
 
-	if(!this->host->rp_key_data)
+	if(!this->host->HasRPkey())
 	{
-		// user must provide psn id for registration
-		std::string account_id = this->settings->GetPSNAccountID(this->host);
-		std::string online_id = this->settings->GetPSNOnlineID(this->host);
-		if(this->host->system_version >= 7000000 && account_id.length() <= 0)
-		{
-			// PS4 firmware > 7.0
-			DIALOG(upaid, "Undefined PSN Account ID (Please configure a valid psn_account_id)");
-			return;
-		}
-		else if( this->host->system_version < 7000000 && this->host->system_version > 0 && online_id.length() <= 0)
-		{
-			// use oline ID for ps4 < 7.0
-			DIALOG(upoid, "Undefined PSN Online ID (Please configure a valid psn_online_id)");
-			return;
-		}
-
-		// add HostConnected function to regist_event_type_finished_success
-		auto event_type_finished_success_cb = [this]()
-		{
-			// save RP keys
-			this->settings->WriteFile();
-			// FIXME: may raise a connection refused
-			// when the connection is triggered
-			// just after the register success
-			sleep(2);
-			ConnectSession();
-			// decrement block input token number
-			brls::Application::unblockInputs();
-		};
-		this->host->SetRegistEventTypeFinishedSuccess(event_type_finished_success_cb);
-
-		auto event_type_finished_failed_cb = [this]()
-		{
-			// unlock user inputs
-			brls::Application::unblockInputs();
-			brls::Application::notify("Registration failed");
-		};
-		this->host->SetRegistEventTypeFinishedFailed(event_type_finished_failed_cb);
-
-		this->Register(false);
+		this->Register();
 	}
 	else
 	{
@@ -197,10 +203,11 @@ void HostInterface::Disconnect()
 		this->host->StopSession();
 		this->connected = false;
 	}
+
 	this->host->FiniSession();
 }
 
-bool HostInterface::Stream()
+void HostInterface::Stream()
 {
 	this->connected = true;
 	// https://github.com/natinusala/borealis/issues/59
@@ -211,11 +218,10 @@ bool HostInterface::Stream()
 	// brls::Application::setDisplayFramerate(true);
 
 	// push raw opengl stream over borealis
-	brls::Application::pushView(new PS4RemotePlay(this->io, this->host));
-	return true;
+	brls::Application::pushView(new PSRemotePlay(this->host));
 }
 
-bool HostInterface::CloseStream(ChiakiQuitEvent * quit)
+void HostInterface::CloseStream(ChiakiQuitEvent *quit)
 {
 	// session QUIT call back
 	brls::Application::unblockInputs();
@@ -229,21 +235,20 @@ bool HostInterface::CloseStream(ChiakiQuitEvent * quit)
 	*/
 	brls::Application::notify(chiaki_quit_reason_string(quit->reason));
 	Disconnect();
-	return false;
 }
 
-MainApplication::MainApplication(std::map<std::string, Host> * hosts,
-		Settings * settings, DiscoveryManager * discoverymanager,
-		IO * io, ChiakiLog * log)
-	: hosts(hosts), settings(settings), discoverymanager(discoverymanager),
-	io(io), log(log)
+MainApplication::MainApplication(DiscoveryManager *discoverymanager)
+	: discoverymanager(discoverymanager)
 {
+	this->settings = Settings::GetInstance();
+	this->log = this->settings->GetLogger();
+	this->io = IO::GetInstance();
 }
 
 MainApplication::~MainApplication()
 {
 	this->discoverymanager->SetService(false);
-	//this->io->FreeJoystick();
+	this->io->FreeController();
 	this->io->FreeVideo();
 }
 
@@ -254,7 +259,7 @@ bool MainApplication::Load()
 	brls::Logger::setLogLevel(brls::LogLevel::DEBUG);
 
 	brls::i18n::loadTranslations();
-	if (!brls::Application::init("Chiaki Remote play"))
+	if(!brls::Application::init("Chiaki Remote play"))
 	{
 		brls::Logger::error("Unable to init Borealis application");
 		return false;
@@ -262,91 +267,90 @@ bool MainApplication::Load()
 
 	// init chiaki gl after borealis
 	// let borealis manage the main screen/window
-
 	if(!io->InitVideo(0, 0, SCREEN_W, SCREEN_H))
 	{
 		brls::Logger::error("Failed to initiate Video");
 	}
 
-	brls::Logger::info("Load sdl joysticks");
-	if(!io->InitJoystick())
+	brls::Logger::info("Load sdl/hid controller");
+	if(!io->InitController())
 	{
-		brls::Logger::error("Faled to initiate Joysticks");
+		brls::Logger::error("Faled to initiate Controller");
 	}
 
 	// Create a view
 	this->rootFrame = new brls::TabFrame();
-	this->rootFrame->setTitle("Chiaki: Open Source PS4 Remote Play Client");
-	this->rootFrame->setIcon(BOREALIS_ASSET("icon.jpg"));
+	this->rootFrame->setTitle("Chiaki: Open Source PlayStation Remote Play Client");
+	this->rootFrame->setIcon(BOREALIS_ASSET("icon.png"));
 
-	brls::List* config = new brls::List();
+	brls::List *config = new brls::List();
+	brls::List *add_host = new brls::List();
+
 	BuildConfigurationMenu(config);
-
+	BuildAddHostConfigurationMenu(add_host);
 	this->rootFrame->addTab("Configuration", config);
+	this->rootFrame->addTab("Add Host", add_host);
 	// ----------------
 	this->rootFrame->addSeparator();
 
 	// Add the root view to the stack
 	brls::Application::pushView(this->rootFrame);
+
+	std::map<std::string, Host> *hosts = this->settings->GetHostsMap();
 	while(brls::Application::mainLoop())
 	{
-		for(auto it = this->hosts->begin(); it != this->hosts->end(); it++)
+		for(auto it = hosts->begin(); it != hosts->end(); it++)
 		{
-			if(this->host_menuitems.find(&it->second) == this->host_menuitems.end())
+			// add host to the gui only if the host is registered or discovered
+			if(this->host_menuitems.find(&it->second) == this->host_menuitems.end() && (it->second.HasRPkey() == true || it->second.IsDiscovered() == true))
 			{
-				brls::List* new_host = new brls::List();
+				HostInterface *new_host = new HostInterface(&it->second);
 				this->host_menuitems[&it->second] = new_host;
 				// create host if udefined
-				HostInterface host_menu = HostInterface(new_host, this->io, &it->second, this->settings);
 				BuildConfigurationMenu(new_host, &it->second);
-				this->rootFrame->addTab(it->second.host_name.c_str(), new_host);
+				this->rootFrame->addTab(it->second.GetHostName().c_str(), new_host);
 			}
 		}
 	}
 	return true;
 }
 
-bool MainApplication::BuildConfigurationMenu(brls::List * ls, Host * host)
+bool MainApplication::BuildConfigurationMenu(brls::List *ls, Host *host)
 {
-	std::string psn_online_id_string = this->settings->GetPSNOnlineID(host);
-	brls::ListItem* psn_online_id = new brls::ListItem("PSN Online ID");
-	psn_online_id->setValue(psn_online_id_string.c_str());
-	auto psn_online_id_cb = [this, host, psn_online_id](brls::View * view)
-	{
-		char online_id[256] = {0};
-		bool input = this->io->ReadUserKeyboard(online_id, sizeof(online_id));
-		if(input)
-		{
-			// update gui
-			psn_online_id->setValue(online_id);
-			// push in setting
-			this->settings->SetPSNOnlineID(host, online_id);
-			// write on disk
-			this->settings->WriteFile();
-		}
-	};
-	psn_online_id->getClickEvent()->subscribe(psn_online_id_cb);
-	ls->addView(psn_online_id);
-
 	std::string psn_account_id_string = this->settings->GetPSNAccountID(host);
-	brls::ListItem* psn_account_id = new brls::ListItem("PSN Account ID",  "v7.0 and greater");
-	psn_account_id->setValue(psn_account_id_string.c_str());
-	auto psn_account_id_cb = [this, host, psn_account_id](brls::View * view)
-	{
-		char account_id[CHIAKI_PSN_ACCOUNT_ID_SIZE * 2] = {0};
-		bool input = this->io->ReadUserKeyboard(account_id, sizeof(account_id));
-		if(input)
-		{
-			// update gui
-			psn_account_id->setValue(account_id);
-			// push in setting
-			this->settings->SetPSNAccountID(host, account_id);
-			// write on disk
-			this->settings->WriteFile();
-		}
+	brls::InputListItem *psn_account_id = new brls::InputListItem("PSN Account ID", psn_account_id_string,
+		"Account ID in base64 format", "PS5 or PS4 v7.0 and greater", CHIAKI_PSN_ACCOUNT_ID_SIZE * 2,
+		brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_SPACE |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_AT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_PERCENT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_BACKSLASH);
+
+	auto psn_account_id_cb = [this, host, psn_account_id](brls::View *view) {
+		// retrieve, push and save setting
+		this->settings->SetPSNAccountID(host, psn_account_id->getValue());
+		// write on disk
+		this->settings->WriteFile();
 	};
 	psn_account_id->getClickEvent()->subscribe(psn_account_id_cb);
 	ls->addView(psn_account_id);
+
+	std::string psn_online_id_string = this->settings->GetPSNOnlineID(host);
+	brls::InputListItem *psn_online_id = new brls::InputListItem("PSN Online ID",
+		psn_online_id_string, "", "", 16,
+		brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_SPACE |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_AT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_PERCENT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_FORWSLASH |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_BACKSLASH);
+
+	auto psn_online_id_cb = [this, host, psn_online_id](brls::View *view) {
+		// retrieve, push and save setting
+		this->settings->SetPSNOnlineID(host, psn_online_id->getValue());
+		// write on disk
+		this->settings->WriteFile();
+	};
+	psn_online_id->getClickEvent()->subscribe(psn_online_id_cb);
+	ls->addView(psn_online_id);
 
 	int value;
 	ChiakiVideoResolutionPreset resolution_preset = this->settings->GetVideoResolution(host);
@@ -363,11 +367,10 @@ bool MainApplication::BuildConfigurationMenu(brls::List * ls, Host * host)
 			break;
 	}
 
-	brls::SelectListItem* resolution = new brls::SelectListItem(
-			"Resolution", { "720p", "540p", "360p" }, value);
+	brls::SelectListItem *resolution = new brls::SelectListItem(
+		"Resolution", { "720p", "540p", "360p" }, value);
 
-	auto resolution_cb = [this, host](int result)
-	{
+	auto resolution_cb = [this, host](int result) {
 		ChiakiVideoResolutionPreset value = CHIAKI_VIDEO_RESOLUTION_PRESET_720p;
 		switch(result)
 		{
@@ -398,11 +401,10 @@ bool MainApplication::BuildConfigurationMenu(brls::List * ls, Host * host)
 			break;
 	}
 
-	brls::SelectListItem* fps = new brls::SelectListItem(
-			"FPS", { "60", "30"}, value);
+	brls::SelectListItem *fps = new brls::SelectListItem(
+		"FPS", { "60", "30" }, value);
 
-	auto fps_cb = [this, host](int result)
-	{
+	auto fps_cb = [this, host](int result) {
 		ChiakiVideoFPSPreset value = CHIAKI_VIDEO_FPS_PRESET_60;
 		switch(result)
 		{
@@ -423,77 +425,132 @@ bool MainApplication::BuildConfigurationMenu(brls::List * ls, Host * host)
 	if(host != nullptr)
 	{
 		// message delimiter
-		brls::Label* info = new brls::Label(brls::LabelStyle::REGULAR,
-				"Host information", true);
+		brls::Label *info = new brls::Label(brls::LabelStyle::REGULAR,
+			"Host information", true);
 		ls->addView(info);
 
 		std::string host_name_string = this->settings->GetHostName(host);
-		brls::ListItem* host_name = new brls::ListItem("PS4 Hostname");
+		brls::ListItem *host_name = new brls::ListItem("PS Hostname");
 		host_name->setValue(host_name_string.c_str());
 		ls->addView(host_name);
 
-		std::string host_ipaddr_string = settings->GetHostIPAddr(host);
-		brls::ListItem* host_ipaddr = new brls::ListItem("PS4 IP Address");
-		host_ipaddr->setValue(host_ipaddr_string.c_str());
-		ls->addView(host_ipaddr);
+		std::string host_addr_string = settings->GetHostAddr(host);
+		brls::ListItem *host_addr = new brls::ListItem("PS Address");
+		host_addr->setValue(host_addr_string.c_str());
+		ls->addView(host_addr);
 
-		std::string host_rp_regist_key_string = settings->GetHostRPRegistKey(host);
-		brls::ListItem* host_rp_regist_key = new brls::ListItem("RP Register Key");
-		host_rp_regist_key->setValue(host_rp_regist_key_string.c_str());
-		ls->addView(host_rp_regist_key);
-
-		std::string host_rp_key_string = settings->GetHostRPKey(host);
-		brls::ListItem* host_rp_key = new brls::ListItem("RP Key");
-		host_rp_key->setValue(host_rp_key_string.c_str());
-		ls->addView(host_rp_key);
-
-		std::string host_rp_key_type_string = std::to_string(settings->GetHostRPKeyType(host));
-		brls::ListItem* host_rp_key_type = new brls::ListItem("RP Key type");
-		host_rp_key_type->setValue(host_rp_key_type_string.c_str());
-		ls->addView(host_rp_key_type);
-
+		brls::ListItem *host_regist_state_item = new brls::ListItem("Register Status");
+		host_regist_state_item->setValue(!settings->GetHostRPKey(host).empty() ? "registered" : "unregistered");
+		ls->addView(host_regist_state_item);
 	}
 
 	return true;
 }
 
-PS4RemotePlay::PS4RemotePlay(IO * io, Host * host)
-	: io(io), host(host)
+void MainApplication::BuildAddHostConfigurationMenu(brls::List *add_host)
 {
-	// store joycon/touchpad keys
-	for(int x=0; x < CHIAKI_CONTROLLER_TOUCHES_MAX; x++)
-		// start touchpad as "untouched"
-		this->state.touches[x].id = -1;
+	// create host for wan connection
+	// brls::Label* add_host_label = new brls::Label(brls::LabelStyle::REGULAR,
+	// 	"Add Host configuration", true);
 
-	// this->base_time=glfwGetTime();
+	brls::InputListItem *display_name = new brls::InputListItem("Display name",
+		"default", "configuration name", "", 16,
+		brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_SPACE |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_AT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_PERCENT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_FORWSLASH |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_BACKSLASH);
+
+	add_host->addView(display_name);
+
+	brls::InputListItem *address = new brls::InputListItem("Remote IP/name",
+		"", "IP address or fqdn", "", 255,
+		brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_SPACE |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_AT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_PERCENT |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_FORWSLASH |
+			brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_BACKSLASH);
+
+	add_host->addView(address);
+
+	// TODO
+	// brls::ListItem* port = new brls::ListItem("Remote session port",  "tcp/udp 9295");
+	// brls::ListItem* port = new brls::ListItem("Remote stream port",  "udp 9296");
+	// brls::ListItem* port = new brls::ListItem("Remote Senkusha port",  "udp 9297");
+	brls::SelectListItem *ps_version = new brls::SelectListItem("PlayStation Version",
+		{ "PS5", "PS4 > 8", "7 < PS4 < 8", "PS4 < 7" });
+	add_host->addView(ps_version);
+
+	brls::ListItem *register_host = new brls::ListItem("Register");
+	auto register_host_cb = [this, display_name, address, ps_version](brls::View *view) {
+		bool err = false;
+		std::string dn = display_name->getValue();
+		std::string addr = address->getValue();
+		ChiakiTarget version = CHIAKI_TARGET_PS4_UNKNOWN;
+
+		switch(ps_version->getSelectedValue())
+		{
+			case 0:
+				// ps5 v1
+				version = CHIAKI_TARGET_PS5_1;
+				break;
+			case 1:
+				// ps4 v8
+				version = CHIAKI_TARGET_PS4_10;
+				break;
+			case 2:
+				// ps4 v7
+				version = CHIAKI_TARGET_PS4_9;
+				break;
+			case 3:
+				// ps4 v6
+				version = CHIAKI_TARGET_PS4_8;
+				break;
+		}
+
+		if(dn.length() <= 0)
+		{
+			brls::Application::notify("No Display name defined");
+			err = true;
+		}
+
+		if(addr.length() <= 0)
+		{
+			brls::Application::notify("No Remote address provided");
+			err = true;
+		}
+
+		if(version <= CHIAKI_TARGET_PS4_UNKNOWN)
+		{
+			brls::Application::notify("No PlayStation Version provided");
+			err = true;
+		}
+
+		if(err)
+			return;
+
+		Host *host = this->settings->GetOrCreateHost(&dn);
+		host->SetHostAddr(addr);
+		host->SetChiakiTarget(version);
+		HostInterface::Register(host);
+	};
+	register_host->getClickEvent()->subscribe(register_host_cb);
+
+	add_host->addView(register_host);
 }
 
-void PS4RemotePlay::draw(NVGcontext* vg, int x, int y, unsigned width, unsigned height, brls::Style* style, brls::FrameContext* ctx)
+PSRemotePlay::PSRemotePlay(Host *host)
+	: host(host)
 {
-	this->io->MainLoop(&this->state);
-	this->host->SendFeedbackState(&state);
-
-	// FPS calculation
-	// this->frame_counter += 1;
-	// double frame_time = glfwGetTime();
-	// if((frame_time - base_time) >= 1.0)
-	// {
-	// 	base_time += 1;
-	// 	//printf("FPS: %d\n", this->frame_counter);
-	// 	this->fps = this->frame_counter;
-	// 	this->frame_counter = 0;
-	// }
-	// nvgBeginPath(vg);
-	// nvgFillColor(vg, nvgRGBA(255,192,0,255));
-	// nvgFontFaceId(vg, ctx->fontStash->regular);
-	// nvgFontSize(vg, style->Label.smallFontSize);
-	// nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-	// char fps_str[9] = {0};
-	// sprintf(fps_str, "FPS: %000d", this->fps);
-	// nvgText(vg, 5,10, fps_str, NULL);
+	this->io = IO::GetInstance();
 }
 
-PS4RemotePlay::~PS4RemotePlay()
+void PSRemotePlay::draw(NVGcontext *vg, int x, int y, unsigned width, unsigned height, brls::Style *style, brls::FrameContext *ctx)
 {
+	this->io->MainLoop();
+	this->host->SendFeedbackState();
 }
 
+PSRemotePlay::~PSRemotePlay()
+{
+}

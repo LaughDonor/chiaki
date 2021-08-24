@@ -14,16 +14,17 @@
 
 #define SETSU_UPDATE_INTERVAL_MS 4
 
-StreamSessionConnectInfo::StreamSessionConnectInfo(Settings *settings, QString host, QByteArray regist_key, QByteArray morning, bool fullscreen)
+StreamSessionConnectInfo::StreamSessionConnectInfo(Settings *settings, ChiakiTarget target, QString host, QByteArray regist_key, QByteArray morning, bool fullscreen)
 	: settings(settings)
 {
 	key_map = settings->GetControllerMappingForDecoding();
 	decoder = settings->GetDecoder();
-	hw_decode_engine = settings->GetHardwareDecodeEngine();
+	hw_decoder = settings->GetHardwareDecoder();
 	audio_out_device = settings->GetAudioOutDevice();
 	log_level_mask = settings->GetLogLevelMask();
 	log_file = CreateLogFilename();
 	video_profile = settings->GetVideoProfile();
+	this->target = target;
 	this->host = host;
 	this->regist_key = regist_key;
 	this->morning = morning;
@@ -34,16 +35,16 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(Settings *settings, QString h
 
 static void AudioSettingsCb(uint32_t channels, uint32_t rate, void *user);
 static void AudioFrameCb(int16_t *buf, size_t samples_count, void *user);
-static bool VideoSampleCb(uint8_t *buf, size_t buf_size, void *user);
 static void EventCb(ChiakiEvent *event, void *user);
 #if CHIAKI_GUI_ENABLE_SETSU
 static void SessionSetsuCb(SetsuEvent *event, void *user);
 #endif
+static void FfmpegFrameCb(ChiakiFfmpegDecoder *decoder, void *user);
 
 StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObject *parent)
 	: QObject(parent),
 	log(this, connect_info.log_level_mask, connect_info.log_file),
-	video_decoder(nullptr),
+	ffmpeg_decoder(nullptr),
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 	pi_decoder(nullptr),
 #endif
@@ -51,6 +52,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	audio_io(nullptr)
 {
 	connected = false;
+	ChiakiErrorCode err;
 
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 	if(connect_info.decoder == Decoder::Pi)
@@ -62,7 +64,22 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	else
 	{
 #endif
-		video_decoder = new VideoDecoder(connect_info.hw_decode_engine, log.GetChiakiLog());
+		ffmpeg_decoder = new ChiakiFfmpegDecoder;
+		ChiakiLogSniffer sniffer;
+		chiaki_log_sniffer_init(&sniffer, CHIAKI_LOG_ALL, GetChiakiLog());
+		err = chiaki_ffmpeg_decoder_init(ffmpeg_decoder,
+				chiaki_log_sniffer_get_log(&sniffer),
+				chiaki_target_is_ps5(connect_info.target) ? connect_info.video_profile.codec : CHIAKI_CODEC_H264,
+				connect_info.hw_decoder.isEmpty() ? NULL : connect_info.hw_decoder.toUtf8().constData(),
+				FfmpegFrameCb, this);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			QString log = QString::fromUtf8(chiaki_log_sniffer_get_buffer(&sniffer));
+			chiaki_log_sniffer_fini(&sniffer);
+			throw ChiakiException("Failed to initialize FFMPEG Decoder:\n" + log);
+		}
+		chiaki_log_sniffer_fini(&sniffer);
+		ffmpeg_decoder->log = GetChiakiLog();
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 	}
 #endif
@@ -85,9 +102,20 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 	QByteArray host_str = connect_info.host.toUtf8();
 
-	ChiakiConnectInfo chiaki_connect_info;
+	ChiakiConnectInfo chiaki_connect_info = {};
+	chiaki_connect_info.ps5 = chiaki_target_is_ps5(connect_info.target);
 	chiaki_connect_info.host = host_str.constData();
 	chiaki_connect_info.video_profile = connect_info.video_profile;
+	chiaki_connect_info.video_profile_auto_downgrade = true;
+	chiaki_connect_info.enable_keyboard = false;
+
+#if CHIAKI_LIB_ENABLE_PI_DECODER
+	if(connect_info.decoder == Decoder::Pi && chiaki_connect_info.video_profile.codec != CHIAKI_CODEC_H264)
+	{
+		CHIAKI_LOGW(GetChiakiLog(), "A codec other than H264 was requested for Pi Decoder. Falling back to it.");
+		chiaki_connect_info.video_profile.codec = CHIAKI_CODEC_H264;
+	}
+#endif
 
 	if(connect_info.regist_key.size() != sizeof(chiaki_connect_info.regist_key))
 		throw ChiakiException("RegistKey invalid");
@@ -99,7 +127,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 	chiaki_controller_state_set_idle(&keyboard_state);
 
-	ChiakiErrorCode err = chiaki_session_init(&session, &chiaki_connect_info, log.GetChiakiLog());
+	err = chiaki_session_init(&session, &chiaki_connect_info, GetChiakiLog());
 	if(err != CHIAKI_ERR_SUCCESS)
 		throw ChiakiException("Chiaki Session Init failed: " + QString::fromLocal8Bit(chiaki_error_string(err)));
 
@@ -114,7 +142,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	else
 	{
 #endif
-		chiaki_session_set_video_sample_cb(&session, VideoSampleCb, this);
+		chiaki_session_set_video_sample_cb(&session, chiaki_ffmpeg_decoder_video_sample_cb, ffmpeg_decoder);
 #if CHIAKI_LIB_ENABLE_PI_DECODER
 	}
 #endif
@@ -126,11 +154,20 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 #endif
 
 #if CHIAKI_GUI_ENABLE_SETSU
+	setsu_motion_device = nullptr;
 	chiaki_controller_state_set_idle(&setsu_state);
+	orient_dirty = true;
+	chiaki_orientation_tracker_init(&orient_tracker);
 	setsu = setsu_new();
 	auto timer = new QTimer(this);
 	connect(timer, &QTimer::timeout, this, [this]{
 		setsu_poll(setsu, SessionSetsuCb, this);
+		if(orient_dirty)
+		{
+			chiaki_orientation_tracker_apply_to_controller_state(&orient_tracker, &setsu_state);
+			SendFeedbackState();
+			orient_dirty = false;
+		}
 	});
 	timer->start(SETSU_UPDATE_INTERVAL_MS);
 #endif
@@ -158,7 +195,11 @@ StreamSession::~StreamSession()
 		free(pi_decoder);
 	}
 #endif
-	delete video_decoder;
+	if(ffmpeg_decoder)
+	{
+		chiaki_ffmpeg_decoder_fini(ffmpeg_decoder);
+		delete ffmpeg_decoder;
+	}
 }
 
 void StreamSession::Start()
@@ -290,17 +331,16 @@ void StreamSession::SendFeedbackState()
 	ChiakiControllerState state;
 	chiaki_controller_state_set_idle(&state);
 
-#if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+#if CHIAKI_GUI_ENABLE_SETSU
+	// setsu is the one that potentially has gyro/accel/orient so copy that directly first
+	state = setsu_state;
+#endif
+
 	for(auto controller : controllers)
 	{
 		auto controller_state = controller->GetState();
 		chiaki_controller_state_or(&state, &state, &controller_state);
 	}
-#endif
-
-#if CHIAKI_GUI_ENABLE_SETSU
-	chiaki_controller_state_or(&state, &state, &setsu_state);
-#endif
 
 	chiaki_controller_state_or(&state, &state, &keyboard_state);
 	chiaki_session_set_controller_state(&session, &state);
@@ -344,11 +384,6 @@ void StreamSession::PushAudioFrame(int16_t *buf, size_t samples_count)
 	audio_io->write((const char *)buf, static_cast<qint64>(samples_count * 2 * 2));
 }
 
-void StreamSession::PushVideoSample(uint8_t *buf, size_t buf_size)
-{
-	video_decoder->PushFrame(buf, buf_size);
-}
-
 void StreamSession::Event(ChiakiEvent *event)
 {
 	switch(event->type)
@@ -363,6 +398,17 @@ void StreamSession::Event(ChiakiEvent *event)
 		case CHIAKI_EVENT_LOGIN_PIN_REQUEST:
 			emit LoginPINRequested(event->login_pin_request.pin_incorrect);
 			break;
+		case CHIAKI_EVENT_RUMBLE: {
+			uint8_t left = event->rumble.left;
+			uint8_t right = event->rumble.right;
+			QMetaObject::invokeMethod(this, [this, left, right]() {
+				for(auto controller : controllers)
+					controller->SetRumble(left, right);
+			});
+			break;
+		}
+		default:
+			break;
 	}
 }
 
@@ -374,27 +420,64 @@ void StreamSession::HandleSetsuEvent(SetsuEvent *event)
 	switch(event->type)
 	{
 		case SETSU_EVENT_DEVICE_ADDED:
-			setsu_connect(setsu, event->path);
+			switch(event->dev_type)
+			{
+				case SETSU_DEVICE_TYPE_TOUCHPAD:
+					// connect all the touchpads!
+					if(setsu_connect(setsu, event->path, event->dev_type))
+						CHIAKI_LOGI(GetChiakiLog(), "Connected Setsu Touchpad Device %s", event->path);
+					else
+						CHIAKI_LOGE(GetChiakiLog(), "Failed to connect to Setsu Touchpad Device %s", event->path);
+					break;
+				case SETSU_DEVICE_TYPE_MOTION:
+					// connect only one motion since multiple make no sense
+					if(setsu_motion_device)
+					{
+						CHIAKI_LOGI(GetChiakiLog(), "Setsu Motion Device %s detected there is already one connected",
+								event->path);
+						break;
+					}
+					setsu_motion_device = setsu_connect(setsu, event->path, event->dev_type);
+					if(setsu_motion_device)
+						CHIAKI_LOGI(GetChiakiLog(), "Connected Setsu Motion Device %s", event->path);
+					else
+						CHIAKI_LOGE(GetChiakiLog(), "Failed to connect to Setsu Motion Device %s", event->path);
+					break;
+			}
 			break;
 		case SETSU_EVENT_DEVICE_REMOVED:
-			for(auto it=setsu_ids.begin(); it!=setsu_ids.end();)
+			switch(event->dev_type)
 			{
-				if(it.key().first == event->path)
-				{
-					chiaki_controller_state_stop_touch(&setsu_state, it.value());
-					setsu_ids.erase(it++);
-				}
-				else
-					it++;
+				case SETSU_DEVICE_TYPE_TOUCHPAD:
+					CHIAKI_LOGI(GetChiakiLog(), "Setsu Touchpad Device %s disconnected", event->path);
+					for(auto it=setsu_ids.begin(); it!=setsu_ids.end();)
+					{
+						if(it.key().first == event->path)
+						{
+							chiaki_controller_state_stop_touch(&setsu_state, it.value());
+							setsu_ids.erase(it++);
+						}
+						else
+							it++;
+					}
+					SendFeedbackState();
+					break;
+				case SETSU_DEVICE_TYPE_MOTION:
+					if(!setsu_motion_device || strcmp(setsu_device_get_path(setsu_motion_device), event->path))
+						break;
+					CHIAKI_LOGI(GetChiakiLog(), "Setsu Motion Device %s disconnected", event->path);
+					setsu_motion_device = nullptr;
+					chiaki_orientation_tracker_init(&orient_tracker);
+					orient_dirty = true;
+					break;
 			}
-			SendFeedbackState();
 			break;
 		case SETSU_EVENT_TOUCH_DOWN:
 			break;
 		case SETSU_EVENT_TOUCH_UP:
 			for(auto it=setsu_ids.begin(); it!=setsu_ids.end(); it++)
 			{
-				if(it.key().first == setsu_device_get_path(event->dev) && it.key().second == event->tracking_id)
+				if(it.key().first == setsu_device_get_path(event->dev) && it.key().second == event->touch.tracking_id)
 				{
 					chiaki_controller_state_stop_touch(&setsu_state, it.value());
 					setsu_ids.erase(it);
@@ -404,18 +487,18 @@ void StreamSession::HandleSetsuEvent(SetsuEvent *event)
 			SendFeedbackState();
 			break;
 		case SETSU_EVENT_TOUCH_POSITION: {
-			QPair<QString, SetsuTrackingId> k =  { setsu_device_get_path(event->dev), event->tracking_id };
+			QPair<QString, SetsuTrackingId> k =  { setsu_device_get_path(event->dev), event->touch.tracking_id };
 			auto it = setsu_ids.find(k);
 			if(it == setsu_ids.end())
 			{
-				int8_t cid = chiaki_controller_state_start_touch(&setsu_state, event->x, event->y);
+				int8_t cid = chiaki_controller_state_start_touch(&setsu_state, event->touch.x, event->touch.y);
 				if(cid >= 0)
 					setsu_ids[k] = (uint8_t)cid;
 				else
 					break;
 			}
 			else
-				chiaki_controller_state_set_touch_pos(&setsu_state, it.value(), event->x, event->y);
+				chiaki_controller_state_set_touch_pos(&setsu_state, it.value(), event->touch.x, event->touch.y);
 			SendFeedbackState();
 			break;
 		}
@@ -425,9 +508,21 @@ void StreamSession::HandleSetsuEvent(SetsuEvent *event)
 		case SETSU_EVENT_BUTTON_UP:
 			setsu_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 			break;
+		case SETSU_EVENT_MOTION:
+			chiaki_orientation_tracker_update(&orient_tracker,
+					event->motion.gyro_x, event->motion.gyro_y, event->motion.gyro_z,
+					event->motion.accel_x, event->motion.accel_y, event->motion.accel_z,
+					event->motion.timestamp);
+			orient_dirty = true;
+			break;
 	}
 }
 #endif
+
+void StreamSession::TriggerFfmpegFrameAvailable()
+{
+	emit FfmpegFrameAvailable();
+}
 
 class StreamSessionPrivate
 {
@@ -438,11 +533,11 @@ class StreamSessionPrivate
 		}
 
 		static void PushAudioFrame(StreamSession *session, int16_t *buf, size_t samples_count)	{ session->PushAudioFrame(buf, samples_count); }
-		static void PushVideoSample(StreamSession *session, uint8_t *buf, size_t buf_size)		{ session->PushVideoSample(buf, buf_size); }
 		static void Event(StreamSession *session, ChiakiEvent *event)							{ session->Event(event); }
 #if CHIAKI_GUI_ENABLE_SETSU
 		static void HandleSetsuEvent(StreamSession *session, SetsuEvent *event)					{ session->HandleSetsuEvent(event); }
 #endif
+		static void TriggerFfmpegFrameAvailable(StreamSession *session)							{ session->TriggerFfmpegFrameAvailable(); }
 };
 
 static void AudioSettingsCb(uint32_t channels, uint32_t rate, void *user)
@@ -455,13 +550,6 @@ static void AudioFrameCb(int16_t *buf, size_t samples_count, void *user)
 {
 	auto session = reinterpret_cast<StreamSession *>(user);
 	StreamSessionPrivate::PushAudioFrame(session, buf, samples_count);
-}
-
-static bool VideoSampleCb(uint8_t *buf, size_t buf_size, void *user)
-{
-	auto session = reinterpret_cast<StreamSession *>(user);
-	StreamSessionPrivate::PushVideoSample(session, buf, buf_size);
-	return true;
 }
 
 static void EventCb(ChiakiEvent *event, void *user)
@@ -477,3 +565,9 @@ static void SessionSetsuCb(SetsuEvent *event, void *user)
 	StreamSessionPrivate::HandleSetsuEvent(session, event);
 }
 #endif
+
+static void FfmpegFrameCb(ChiakiFfmpegDecoder *decoder, void *user)
+{
+	auto session = reinterpret_cast<StreamSession *>(user);
+	StreamSessionPrivate::TriggerFfmpegFrameAvailable(session);
+}

@@ -70,13 +70,14 @@ void ServerItemWidget::Update(const DisplayServer &display_server)
 	delete_action->setEnabled(!display_server.discovered);
 	wake_action->setEnabled(display_server.registered);
 
-	icon_widget->SetState(display_server.discovered ? display_server.discovery_host.state : CHIAKI_DISCOVERY_HOST_STATE_UNKNOWN);
+	icon_widget->SetState(display_server.IsPS5(),
+			display_server.discovered ? display_server.discovery_host.state : CHIAKI_DISCOVERY_HOST_STATE_UNKNOWN);
 
 	QString top_text = "";
 
 	if(display_server.discovered || display_server.registered)
 	{
-		top_text += (display_server.discovered ? display_server.discovery_host.host_name : display_server.registered_host.GetPS4Nickname()) + "\n";
+		top_text += (display_server.discovered ? display_server.discovery_host.host_name : display_server.registered_host.GetServerNickname()) + "\n";
 	}
 
 	top_text += tr("Address: %1").arg(display_server.GetHostAddr());
@@ -84,7 +85,7 @@ void ServerItemWidget::Update(const DisplayServer &display_server)
 	if(display_server.discovered || display_server.registered)
 	{
 		top_text += "\n" + tr("ID: %1 (%2)").arg(
-				display_server.discovered ? display_server.discovery_host.GetHostMAC().ToString() : display_server.registered_host.GetPS4MAC().ToString(),
+				display_server.discovered ? display_server.discovery_host.GetHostMAC().ToString() : display_server.registered_host.GetServerMAC().ToString(),
 				display_server.registered ? tr("registered") : tr("unregistered"));
 	}
 

@@ -42,17 +42,21 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_regist_start(ChiakiRegist *regist, ChiakiLo
 	if(!regist->info.host)
 		return CHIAKI_ERR_MEMORY;
 
+	ChiakiErrorCode err = CHIAKI_ERR_UNKNOWN;
 	if(regist->info.psn_online_id)
 	{
 		regist->info.psn_online_id = strdup(regist->info.psn_online_id);
 		if(!regist->info.psn_online_id)
+		{
+			err = CHIAKI_ERR_MEMORY;
 			goto error_host;
+		}
 	}
 
 	regist->cb = cb;
 	regist->cb_user = cb_user;
 
-	ChiakiErrorCode err = chiaki_stop_pipe_init(&regist->stop_pipe);
+	err = chiaki_stop_pipe_init(&regist->stop_pipe);
 	if(err != CHIAKI_ERR_SUCCESS)
 		goto error_psn_id;
 
@@ -98,8 +102,24 @@ static const char *const request_head_fmt =
 	"Connection: close\r\n"
 	"Content-Length: %llu\r\n";
 
-static const char *request_path = "/sie/ps4/rp/sess/rgst";
+static const char *request_path_ps5 = "/sie/ps5/rp/sess/rgst";
+static const char *request_path_ps4 = "/sie/ps4/rp/sess/rgst";
 static const char *request_path_ps4_pre10 = "/sce/rp/regist";
+
+static const char *request_path(ChiakiTarget target)
+{
+	switch(target)
+	{
+		case CHIAKI_TARGET_PS5_UNKNOWN:
+		case CHIAKI_TARGET_PS5_1:
+			return request_path_ps5;
+		case CHIAKI_TARGET_PS4_8:
+		case CHIAKI_TARGET_PS4_9:
+			return request_path_ps4_pre10;
+		default:
+			return request_path_ps4;
+	}
+}
 
 static const char *const request_rp_version_fmt = "RP-Version: %s\r\n";
 
@@ -119,8 +139,7 @@ static const char *const request_inner_online_id_fmt =
 
 static int request_header_format(char *buf, size_t buf_size, size_t payload_size, ChiakiTarget target)
 {
-	int cur = snprintf(buf, buf_size, request_head_fmt,
-			target < CHIAKI_TARGET_PS4_10 ? request_path_ps4_pre10 : request_path,
+	int cur = snprintf(buf, buf_size, request_head_fmt, request_path(target),
 			(unsigned long long)payload_size);
 	if(cur < 0 || cur >= payload_size)
 		return -1;
@@ -141,7 +160,6 @@ static int request_header_format(char *buf, size_t buf_size, size_t payload_size
 	return cur;
 }
 
-
 CHIAKI_EXPORT ChiakiErrorCode chiaki_regist_request_payload_format(ChiakiTarget target, const uint8_t *ambassador, uint8_t *buf, size_t *buf_size, ChiakiRPCrypt *crypt, const char *psn_online_id, const uint8_t *psn_account_id, uint32_t pin)
 {
 	size_t buf_size_val = *buf_size;
@@ -159,9 +177,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_regist_request_payload_format(ChiakiTarget 
 	{
 		size_t key_0_off = buf[0x18D] & 0x1F;
 		size_t key_1_off = buf[0] >> 3;
-		chiaki_rpcrypt_init_regist(crypt, ambassador, key_0_off, pin);
+		ChiakiErrorCode err = chiaki_rpcrypt_init_regist(crypt, target, ambassador, key_0_off, pin);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
 		uint8_t aeropause[0x10];
-		chiaki_rpcrypt_aeropause(key_1_off, aeropause, crypt->ambassador);
+		err = chiaki_rpcrypt_aeropause(target, key_1_off, aeropause, crypt->ambassador);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
 		memcpy(buf + 0xc7, aeropause + 8, 8);
 		memcpy(buf + 0x191, aeropause, 8);
 		psn_online_id = NULL; // don't need this
@@ -339,12 +361,16 @@ static ChiakiErrorCode regist_search(ChiakiRegist *regist, struct addrinfo *addr
 
 	ChiakiErrorCode err = CHIAKI_ERR_SUCCESS;
 
+	const char *src = chiaki_target_is_ps5(regist->info.target) ? "SRC3" : "SRC2";
+	const char *res = chiaki_target_is_ps5(regist->info.target) ? "RES3" : "RES2";
+	size_t res_size = strlen(res);
+
 	CHIAKI_LOGI(regist->log, "Regist sending search packet");
 	int r;
 	if(regist->info.broadcast)
-		r = sendto_broadcast(regist->log, sock, "SRC2", 4, 0, &send_addr, send_addr_len);
+		r = sendto_broadcast(regist->log, sock, src, strlen(src) + 1, 0, &send_addr, send_addr_len);
 	else
-		r = send(sock, "SRC2", 4, 0);
+		r = send(sock, src, strlen(src) + 1, 0);
 	if(r < 0)
 	{
 		CHIAKI_LOGE(regist->log, "Regist failed to send search: %s", strerror(errno));
@@ -379,10 +405,10 @@ static ChiakiErrorCode regist_search(ChiakiRegist *regist, struct addrinfo *addr
 			goto done;
 		}
 
-		CHIAKI_LOGV(regist->log, "Regist received packet:");
+		CHIAKI_LOGV(regist->log, "Regist received packet: %d >= %d", n, res_size);
 		chiaki_log_hexdump(regist->log, CHIAKI_LOG_VERBOSE, buf, n);
 
-		if(n >= 4 && memcmp(buf, "RES2", 4) == 0)
+		if(n >= res_size && !memcmp(buf, res, res_size))
 		{
 			char addr[64];
 			const char *addr_str = sockaddr_str(recv_addr, addr, sizeof(addr));
@@ -606,20 +632,22 @@ static ChiakiErrorCode regist_parse_response_payload(ChiakiRegist *regist, Chiak
 	}
 
 	memset(host, 0, sizeof(*host));
+	host->target = regist->info.target;
 
 	bool mac_found = false;
 	bool regist_key_found = false;
 	bool key_found = false;
+	bool ps5 = chiaki_target_is_ps5(regist->info.target);
 
 	for(ChiakiHttpHeader *header=headers; header; header=header->next)
 	{
 #define COPY_STRING(name, key_str) \
-		if(strcmp(header->key, key_str) == 0) \
+		if(strcmp(header->key, (key_str)) == 0) \
 		{ \
 			size_t len = strlen(header->value); \
 			if(len >= sizeof(host->name)) \
 			{ \
-				CHIAKI_LOGE(regist->log, "Regist value for " key_str " in response is too long"); \
+				CHIAKI_LOGE(regist->log, "Regist value for %s in response is too long", (key_str)); \
 				continue; \
 			} \
 			memcpy(host->name, header->value, len); \
@@ -630,10 +658,10 @@ static ChiakiErrorCode regist_parse_response_payload(ChiakiRegist *regist, Chiak
 		COPY_STRING(ap_bssid, "AP-Bssid")
 		COPY_STRING(ap_key, "AP-Key")
 		COPY_STRING(ap_name, "AP-Name")
-		COPY_STRING(ps4_nickname, "PS4-Nickname")
+		COPY_STRING(server_nickname, ps5 ? "PS5-Nickname" : "PS4-Nickname")
 #undef COPY_STRING
 
-		if(strcmp(header->key, "PS4-RegistKey") == 0)
+		if(strcmp(header->key, ps5 ? "PS5-RegistKey" : "PS4-RegistKey") == 0)
 		{
 			memset(host->rp_regist_key, 0, sizeof(host->rp_regist_key));
 			size_t buf_size = sizeof(host->rp_regist_key);
@@ -666,14 +694,14 @@ static ChiakiErrorCode regist_parse_response_payload(ChiakiRegist *regist, Chiak
 				key_found = true;
 			}
 		}
-		else if(strcmp(header->key, "PS4-Mac") == 0)
+		else if(strcmp(header->key, ps5 ? "PS5-Mac" : "PS4-Mac") == 0)
 		{
-			size_t buf_size = sizeof(host->ps4_mac);
-			err = parse_hex((uint8_t *)host->ps4_mac, &buf_size, header->value, strlen(header->value));
-			if(err != CHIAKI_ERR_SUCCESS || buf_size != sizeof(host->ps4_mac))
+			size_t buf_size = sizeof(host->server_mac);
+			err = parse_hex((uint8_t *)host->server_mac, &buf_size, header->value, strlen(header->value));
+			if(err != CHIAKI_ERR_SUCCESS || buf_size != sizeof(host->server_mac))
 			{
 				CHIAKI_LOGE(regist->log, "Regist received invalid MAC Address in response");
-				memset(host->ps4_mac, 0, sizeof(host->ps4_mac));
+				memset(host->server_mac, 0, sizeof(host->server_mac));
 			}
 			else
 			{

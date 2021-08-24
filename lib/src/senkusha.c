@@ -361,7 +361,7 @@ static ChiakiErrorCode senkusha_run_mtu_in_test(ChiakiSenkusha *senkusha, uint32
 			senkusha->state_failed = false;
 			senkusha->mtu_id = ++request_id;
 
-			tkproto_SenkushaMtuCommand mtu_cmd;
+			tkproto_SenkushaMtuCommand mtu_cmd = { 0 };
 			mtu_cmd.id = request_id;
 			mtu_cmd.mtu_req = cur;
 			mtu_cmd.num = 1;
@@ -645,7 +645,6 @@ static void senkusha_takion_data(ChiakiSenkusha *senkusha, ChiakiTakionMessageDa
 			senkusha->state_finished = true;
 			chiaki_cond_signal(&senkusha->state_cond);
 		}
-
 	}
 	chiaki_mutex_unlock(&senkusha->state_mutex);
 }
@@ -878,4 +877,3 @@ static ChiakiErrorCode senkusha_send_data_wait_for_ack(ChiakiSenkusha *senkusha,
 
 	return err;
 }
-

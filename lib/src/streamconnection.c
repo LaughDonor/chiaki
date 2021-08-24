@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 
+#include "chiaki/common.h"
 #include <chiaki/streamconnection.h>
 #include <chiaki/session.h>
 #include <chiaki/launchspec.h>
@@ -44,6 +45,8 @@ void chiaki_session_send_event(ChiakiSession *session, ChiakiEvent *event);
 
 static void stream_connection_takion_cb(ChiakiTakionEvent *event, void *user);
 static void stream_connection_takion_data(ChiakiStreamConnection *stream_connection, ChiakiTakionMessageDataType data_type, uint8_t *buf, size_t buf_size);
+static void stream_connection_takion_data_protobuf(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
+static void stream_connection_takion_data_rumble(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream_connection);
 static ChiakiErrorCode stream_connection_send_disconnect(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
@@ -52,7 +55,6 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 static ChiakiErrorCode stream_connection_send_streaminfo_ack(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_av(ChiakiStreamConnection *stream_connection, ChiakiTakionAVPacket *packet);
 static ChiakiErrorCode stream_connection_send_heartbeat(ChiakiStreamConnection *stream_connection);
-
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnection *stream_connection, ChiakiSession *session)
 {
@@ -118,7 +120,6 @@ CHIAKI_EXPORT void chiaki_stream_connection_fini(ChiakiStreamConnection *stream_
 	chiaki_mutex_fini(&stream_connection->state_mutex);
 }
 
-
 static bool state_finished_cond_check(void *user)
 {
 	ChiakiStreamConnection *stream_connection = user;
@@ -142,7 +143,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 	takion_info.ip_dontfrag = false;
 
 	takion_info.enable_crypt = true;
-	takion_info.protocol_version = 9;
+	takion_info.protocol_version = chiaki_target_is_ps5(session->target) ? 12 : 9;
 
 	takion_info.cb = stream_connection_takion_cb;
 	takion_info.cb_user = stream_connection;
@@ -367,9 +368,21 @@ static void stream_connection_takion_cb(ChiakiTakionEvent *event, void *user)
 
 static void stream_connection_takion_data(ChiakiStreamConnection *stream_connection, ChiakiTakionMessageDataType data_type, uint8_t *buf, size_t buf_size)
 {
-	if(data_type != CHIAKI_TAKION_MESSAGE_DATA_TYPE_PROTOBUF)
-		return;
+	switch(data_type)
+	{
+		case CHIAKI_TAKION_MESSAGE_DATA_TYPE_PROTOBUF:
+			stream_connection_takion_data_protobuf(stream_connection, buf, buf_size);
+			break;
+		case CHIAKI_TAKION_MESSAGE_DATA_TYPE_RUMBLE:
+			stream_connection_takion_data_rumble(stream_connection, buf, buf_size);
+			break;
+		default:
+			break;
+	}
+}
 
+static void stream_connection_takion_data_protobuf(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
+{
 	chiaki_mutex_lock(&stream_connection->state_mutex);
 	switch(stream_connection->state)
 	{
@@ -384,6 +397,22 @@ static void stream_connection_takion_data(ChiakiStreamConnection *stream_connect
 			break;
 	}
 	chiaki_mutex_unlock(&stream_connection->state_mutex);
+}
+
+static void stream_connection_takion_data_rumble(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
+{
+	if(buf_size < 3)
+	{
+		CHIAKI_LOGE(stream_connection->log, "StreamConnection got rumble packet with size %#llx < 3",
+				(unsigned long long)buf_size);
+		return;
+	}
+	ChiakiEvent event = { 0 };
+	event.type = CHIAKI_EVENT_RUMBLE;
+	event.rumble.unknown = buf[0];
+	event.rumble.left = buf[1];
+	event.rumble.right = buf[2];
+	chiaki_session_send_event(stream_connection->session, &event);
 }
 
 static void stream_connection_takion_data_handle_disconnect(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
@@ -608,7 +637,6 @@ static bool pb_decode_resolution(pb_istream_t *stream, const pb_field_t *field, 
 	return true;
 }
 
-
 static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
 {
 	tkproto_TakionMessage msg;
@@ -677,11 +705,9 @@ error:
 	chiaki_cond_signal(&stream_connection->state_cond);
 }
 
-
-
 static bool chiaki_pb_encode_zero_encrypted_key(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
-	if (!pb_encode_tag_for_field(stream, field))
+	if(!pb_encode_tag_for_field(stream, field))
 		return false;
 	uint8_t data[] = { 0, 0, 0, 0 };
 	return pb_encode_string(stream, data, sizeof(data));
@@ -694,6 +720,7 @@ static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream
 	ChiakiSession *session = stream_connection->session;
 
 	ChiakiLaunchSpec launch_spec;
+	launch_spec.target = session->target;
 	launch_spec.mtu = session->mtu_in;
 	launch_spec.rtt = session->rtt_us / 1000;
 	launch_spec.handshake_key = session->handshake_key;
@@ -701,6 +728,7 @@ static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream
 	launch_spec.width = session->connect_info.video_profile.width;
 	launch_spec.height = session->connect_info.video_profile.height;
 	launch_spec.max_fps = session->connect_info.video_profile.max_fps;
+	launch_spec.codec = session->connect_info.video_profile.codec;
 	launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;
 
 	union
@@ -755,7 +783,7 @@ static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream
 
 	msg.type = tkproto_TakionMessage_PayloadType_BIG;
 	msg.has_big_payload = true;
-	msg.big_payload.client_version = 9;
+	msg.big_payload.client_version = stream_connection->takion.version;
 	msg.big_payload.session_key.arg = session->session_id;
 	msg.big_payload.session_key.funcs.encode = chiaki_pb_encode_string;
 	msg.big_payload.launch_spec.arg = launch_spec_buf.b64;
@@ -833,7 +861,6 @@ static ChiakiErrorCode stream_connection_send_disconnect(ChiakiStreamConnection 
 	return err;
 }
 
-
 static void stream_connection_takion_av(ChiakiStreamConnection *stream_connection, ChiakiTakionAVPacket *packet)
 {
 	chiaki_gkcrypt_decrypt(stream_connection->gkcrypt_remote, packet->key_pos + CHIAKI_GKCRYPT_BLOCK_SIZE, packet->data, packet->data_size);
@@ -843,7 +870,6 @@ static void stream_connection_takion_av(ChiakiStreamConnection *stream_connectio
 	else
 		chiaki_audio_receiver_av_packet(stream_connection->audio_receiver, packet);
 }
-
 
 static ChiakiErrorCode stream_connection_send_heartbeat(ChiakiStreamConnection *stream_connection)
 {

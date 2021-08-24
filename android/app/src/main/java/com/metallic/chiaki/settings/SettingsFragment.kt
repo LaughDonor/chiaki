@@ -25,6 +25,9 @@ class DataStore(val preferences: Preferences): PreferenceDataStore()
 	{
 		preferences.logVerboseKey -> preferences.logVerbose
 		preferences.swapCrossMoonKey -> preferences.swapCrossMoon
+		preferences.rumbleEnabledKey -> preferences.rumbleEnabled
+		preferences.motionEnabledKey -> preferences.motionEnabled
+		preferences.buttonHapticEnabledKey -> preferences.buttonHapticEnabled
 		else -> defValue
 	}
 
@@ -34,6 +37,9 @@ class DataStore(val preferences: Preferences): PreferenceDataStore()
 		{
 			preferences.logVerboseKey -> preferences.logVerbose = value
 			preferences.swapCrossMoonKey -> preferences.swapCrossMoon = value
+			preferences.rumbleEnabledKey -> preferences.rumbleEnabled = value
+			preferences.motionEnabledKey -> preferences.motionEnabled = value
+			preferences.buttonHapticEnabledKey -> preferences.buttonHapticEnabled = value
 		}
 	}
 
@@ -42,6 +48,7 @@ class DataStore(val preferences: Preferences): PreferenceDataStore()
 		preferences.resolutionKey -> preferences.resolution.value
 		preferences.fpsKey -> preferences.fps.value
 		preferences.bitrateKey -> preferences.bitrate?.toString() ?: ""
+		preferences.codecKey -> preferences.codec.value
 		else -> defValue
 	}
 
@@ -60,6 +67,11 @@ class DataStore(val preferences: Preferences): PreferenceDataStore()
 				preferences.fps = fps
 			}
 			preferences.bitrateKey -> preferences.bitrate = value?.toIntOrNull()
+			preferences.codecKey ->
+			{
+				val codec = Preferences.Codec.values().firstOrNull { it.value == value } ?: return
+				preferences.codec = codec
+			}
 		}
 	}
 }
@@ -110,6 +122,11 @@ class SettingsFragment: PreferenceFragmentCompat(), TitleFragment
 		viewModel.bitrateAuto.observe(this, Observer {
 			bitratePreference?.summaryProvider = bitrateSummaryProvider
 		})
+
+		preferenceScreen.findPreference<ListPreference>(getString(R.string.preferences_codec_key))?.let {
+			it.entryValues = Preferences.codecAll.map { codec -> codec.value }.toTypedArray()
+			it.entries = Preferences.codecAll.map { codec -> getString(codec.title) }.toTypedArray()
+		}
 
 		val registeredHostsPreference = preferenceScreen.findPreference<Preference>("registered_hosts")
 		viewModel.registeredHostsCount.observe(this, Observer {

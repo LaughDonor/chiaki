@@ -12,6 +12,7 @@
 
 struct DiscoveryHost
 {
+	bool ps5;
 	ChiakiDiscoveryHostState state;
 	uint16_t host_request_port;
 #define STRING_MEMBER(name) QString name;
@@ -44,7 +45,7 @@ class DiscoveryManager : public QObject
 
 		void SetActive(bool active);
 
-		void SendWakeup(const QString &host, const QByteArray &regist_key);
+		void SendWakeup(const QString &host, const QByteArray &regist_key, bool ps5);
 
 		const QList<DiscoveryHost> GetHosts() const { return hosts; }
 

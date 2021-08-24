@@ -5,7 +5,6 @@
 #include <settingskeycapturedialog.h>
 #include <registdialog.h>
 #include <sessionlog.h>
-#include <videodecoder.h>
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -23,6 +22,7 @@
 #include <QFutureWatcher>
 
 #include <chiaki/config.h>
+#include <chiaki/ffmpegdecoder.h>
 
 const char * const about_string =
 	"<h1>Chiaki</h1> by thestr4ng3r, version " CHIAKI_VERSION
@@ -89,7 +89,7 @@ SettingsDialog::SettingsDialog(Settings *settings, QWidget *parent) : QDialog(pa
 	connect(disconnect_action_combo_box, SIGNAL(currentIndexChanged(int)), this, SLOT(DisconnectActionSelected()));
 
 	general_layout->addRow(tr("Action on Disconnect:"), disconnect_action_combo_box);
-	
+
 	audio_device_combo_box = new QComboBox(this);
 	audio_device_combo_box->addItem(tr("Auto"));
 	auto current_audio_device = settings->GetAudioOutDevice();
@@ -112,7 +112,7 @@ SettingsDialog::SettingsDialog(Settings *settings, QWidget *parent) : QDialog(pa
 		auto available_devices = audio_devices_future_watcher->result();
 		while(audio_device_combo_box->count() > 1) // remove all but "Auto"
 			audio_device_combo_box->removeItem(1);
-		for (QAudioDeviceInfo di : available_devices)
+		for(QAudioDeviceInfo di : available_devices)
 			audio_device_combo_box->addItem(di.deviceName(), di.deviceName());
 		int audio_out_device_index = audio_device_combo_box->findData(settings->GetAudioOutDevice());
 		audio_device_combo_box->setCurrentIndex(audio_out_device_index < 0 ? 0 : audio_out_device_index);
@@ -136,10 +136,10 @@ SettingsDialog::SettingsDialog(Settings *settings, QWidget *parent) : QDialog(pa
 
 	resolution_combo_box = new QComboBox(this);
 	static const QList<QPair<ChiakiVideoResolutionPreset, const char *>> resolution_strings = {
-		{ CHIAKI_VIDEO_RESOLUTION_PRESET_360p, "360p"},
-		{ CHIAKI_VIDEO_RESOLUTION_PRESET_540p, "540p"},
-		{ CHIAKI_VIDEO_RESOLUTION_PRESET_720p, "720p"},
-		{ CHIAKI_VIDEO_RESOLUTION_PRESET_1080p, "1080p (PS4 Pro only)"}
+		{ CHIAKI_VIDEO_RESOLUTION_PRESET_360p, "360p" },
+		{ CHIAKI_VIDEO_RESOLUTION_PRESET_540p, "540p" },
+		{ CHIAKI_VIDEO_RESOLUTION_PRESET_720p, "720p" },
+		{ CHIAKI_VIDEO_RESOLUTION_PRESET_1080p, "1080p (PS5 and PS4 Pro only)" }
 	};
 	auto current_res = settings->GetResolution();
 	for(const auto &p : resolution_strings)
@@ -174,6 +174,21 @@ SettingsDialog::SettingsDialog(Settings *settings, QWidget *parent) : QDialog(pa
 	connect(bitrate_edit, &QLineEdit::textEdited, this, &SettingsDialog::BitrateEdited);
 	UpdateBitratePlaceholder();
 
+	codec_combo_box = new QComboBox(this);
+	static const QList<QPair<ChiakiCodec, QString>> codec_strings = {
+		{ CHIAKI_CODEC_H264, "H264" },
+		{ CHIAKI_CODEC_H265, "H265 (PS5 only)" }
+	};
+	auto current_codec = settings->GetCodec();
+	for(const auto &p : codec_strings)
+	{
+		codec_combo_box->addItem(p.second, (int)p.first);
+		if(current_codec == p.first)
+			codec_combo_box->setCurrentIndex(codec_combo_box->count() - 1);
+	}
+	connect(codec_combo_box, SIGNAL(currentIndexChanged(int)), this, SLOT(CodecSelected()));
+	stream_settings_layout->addRow(tr("Codec:"), codec_combo_box);
+
 	audio_buffer_size_edit = new QLineEdit(this);
 	audio_buffer_size_edit->setValidator(new QIntValidator(1024, 0x20000, audio_buffer_size_edit));
 	unsigned int audio_buffer_size = settings->GetAudioBufferSizeRaw();
@@ -202,22 +217,22 @@ SettingsDialog::SettingsDialog(Settings *settings, QWidget *parent) : QDialog(pa
 	pi_decoder_check_box = nullptr;
 #endif
 
-	hardware_decode_combo_box = new QComboBox(this);
-	static const QList<QPair<HardwareDecodeEngine, const char *>> hardware_decode_engines = {
-		{ HW_DECODE_NONE, "none"},
-		{ HW_DECODE_VAAPI, "vaapi"},
-		{ HW_DECODE_VIDEOTOOLBOX, "videotoolbox"},
-		{ HW_DECODE_CUDA, "cuda"}
-	};
-	auto current_hardware_decode_engine = settings->GetHardwareDecodeEngine();
-	for(const auto &p : hardware_decode_engines)
+	hw_decoder_combo_box = new QComboBox(this);
+	hw_decoder_combo_box->addItem("none", QString());
+	auto current_hw_decoder = settings->GetHardwareDecoder();
+	enum AVHWDeviceType hw_dev = AV_HWDEVICE_TYPE_NONE;
+	while(true)
 	{
-		hardware_decode_combo_box->addItem(p.second, (int)p.first);
-		if(current_hardware_decode_engine == p.first)
-			hardware_decode_combo_box->setCurrentIndex(hardware_decode_combo_box->count() - 1);
+		hw_dev = av_hwdevice_iterate_types(hw_dev);
+		if(hw_dev == AV_HWDEVICE_TYPE_NONE)
+			break;
+		QString name = QString::fromUtf8(av_hwdevice_get_type_name(hw_dev));
+		hw_decoder_combo_box->addItem(name, name);
+		if(current_hw_decoder == name)
+			hw_decoder_combo_box->setCurrentIndex(hw_decoder_combo_box->count() - 1);
 	}
-	connect(hardware_decode_combo_box, SIGNAL(currentIndexChanged(int)), this, SLOT(HardwareDecodeEngineSelected()));
-	decode_settings_layout->addRow(tr("Hardware decode method:"), hardware_decode_combo_box);
+	connect(hw_decoder_combo_box, SIGNAL(currentIndexChanged(int)), this, SLOT(HardwareDecodeEngineSelected()));
+	decode_settings_layout->addRow(tr("Hardware decode method:"), hw_decoder_combo_box);
 	UpdateHardwareDecodeEngineComboBox();
 
 	// Registered Consoles
@@ -317,6 +332,11 @@ void SettingsDialog::BitrateEdited()
 	settings->SetBitrate(bitrate_edit->text().toUInt());
 }
 
+void SettingsDialog::CodecSelected()
+{
+	settings->SetCodec((ChiakiCodec)codec_combo_box->currentData().toInt());
+}
+
 void SettingsDialog::AudioBufferSizeEdited()
 {
 	settings->SetAudioBufferSize(audio_buffer_size_edit->text().toUInt());
@@ -329,12 +349,12 @@ void SettingsDialog::AudioOutputSelected()
 
 void SettingsDialog::HardwareDecodeEngineSelected()
 {
-	settings->SetHardwareDecodeEngine((HardwareDecodeEngine)hardware_decode_combo_box->currentData().toInt());
+	settings->SetHardwareDecoder(hw_decoder_combo_box->currentData().toString());
 }
 
 void SettingsDialog::UpdateHardwareDecodeEngineComboBox()
 {
-	hardware_decode_combo_box->setEnabled(settings->GetDecoder() == Decoder::Ffmpeg);
+	hw_decoder_combo_box->setEnabled(settings->GetDecoder() == Decoder::Ffmpeg);
 }
 
 void SettingsDialog::UpdateBitratePlaceholder()
@@ -348,8 +368,11 @@ void SettingsDialog::UpdateRegisteredHosts()
 	auto hosts = settings->GetRegisteredHosts();
 	for(const auto &host : hosts)
 	{
-		auto item = new QListWidgetItem(QString("%1 (%2)").arg(host.GetPS4MAC().ToString(), host.GetPS4Nickname()));
-		item->setData(Qt::UserRole, QVariant::fromValue(host.GetPS4MAC()));
+		auto item = new QListWidgetItem(QString("%1 (%2, %3)")
+				.arg(host.GetServerMAC().ToString(),
+					chiaki_target_is_ps5(host.GetTarget()) ? "PS5" : "PS4",
+					host.GetServerNickname()));
+		item->setData(Qt::UserRole, QVariant::fromValue(host.GetServerMAC()));
 		registered_hosts_list_widget->addItem(item);
 	}
 }

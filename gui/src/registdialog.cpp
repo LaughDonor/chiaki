@@ -49,24 +49,27 @@ RegistDialog::RegistDialog(Settings *settings, const QString &host, QWidget *par
 		psn_account_id_edit->setEnabled(need_account_id);
 	};
 
-	auto version_layout = new QVBoxLayout(nullptr);
-	ps4_pre9_radio_button = new QRadioButton(tr("< 7.0"), this);
-	version_layout->addWidget(ps4_pre9_radio_button);
+	auto target_layout = new QVBoxLayout(nullptr);
+	ps4_pre9_radio_button = new QRadioButton(tr("PS4 Firmware < 7.0"), this);
+	target_layout->addWidget(ps4_pre9_radio_button);
 	connect(ps4_pre9_radio_button, &QRadioButton::toggled, this, UpdatePSNIDEdits);
-	ps4_pre10_radio_button = new QRadioButton(tr(">= 7.0, < 8.0"), this);
-	version_layout->addWidget(ps4_pre10_radio_button);
+	ps4_pre10_radio_button = new QRadioButton(tr("PS4 Firmware >= 7.0, < 8.0"), this);
+	target_layout->addWidget(ps4_pre10_radio_button);
 	connect(ps4_pre10_radio_button, &QRadioButton::toggled, this, UpdatePSNIDEdits);
-	ps4_10_radio_button = new QRadioButton(tr(">= 8.0"), this);
-	version_layout->addWidget(ps4_10_radio_button);
+	ps4_10_radio_button = new QRadioButton(tr("PS4 Firmware >= 8.0"), this);
+	target_layout->addWidget(ps4_10_radio_button);
 	connect(ps4_10_radio_button, &QRadioButton::toggled, this, UpdatePSNIDEdits);
-	form_layout->addRow(tr("PS4 Firmware:"), version_layout);
+	ps5_radio_button = new QRadioButton(tr("PS5"), this);
+	target_layout->addWidget(ps5_radio_button);
+	connect(ps5_radio_button, &QRadioButton::toggled, this, UpdatePSNIDEdits);
+	form_layout->addRow(tr("Console:"), target_layout);
 
 	psn_online_id_edit = new QLineEdit(this);
 	form_layout->addRow(tr("PSN Online-ID (username, case-sensitive):"), psn_online_id_edit);
 	psn_account_id_edit = new QLineEdit(this);
 	form_layout->addRow(tr("PSN Account-ID (base64):"), psn_account_id_edit);
 
-	ps4_10_radio_button->setChecked(true);
+	ps5_radio_button->setChecked(true);
 
 	UpdatePSNIDEdits();
 
@@ -115,8 +118,10 @@ void RegistDialog::accept()
 		info.target = CHIAKI_TARGET_PS4_8;
 	else if(ps4_pre10_radio_button->isChecked())
 		info.target = CHIAKI_TARGET_PS4_9;
-	else
+	else if(ps4_10_radio_button->isChecked())
 		info.target = CHIAKI_TARGET_PS4_10;
+	else
+		info.target = CHIAKI_TARGET_PS5_1;
 
 	bool need_account_id = NeedAccountId();
 	QByteArray psn_id; // keep this out of the if scope
@@ -200,14 +205,14 @@ void RegistExecuteDialog::Finished()
 
 void RegistExecuteDialog::Success(RegisteredHost host)
 {
-	CHIAKI_LOGI(&log, "Successfully registered %s", host.GetPS4Nickname().toLocal8Bit().constData());
+	CHIAKI_LOGI(&log, "Successfully registered %s", host.GetServerNickname().toLocal8Bit().constData());
 	this->registered_host = host;
 
-	if(settings->GetRegisteredHostRegistered(host.GetPS4MAC()))
+	if(settings->GetRegisteredHostRegistered(host.GetServerMAC()))
 	{
 		int r = QMessageBox::question(this,
 				tr("Console already registered"),
-				tr("The console with ID %1 has already been registered. Should the previous record be overwritten?").arg(host.GetPS4MAC().ToString()));
+				tr("The console with ID %1 has already been registered. Should the previous record be overwritten?").arg(host.GetServerMAC().ToString()));
 		if(r == QMessageBox::No)
 		{
 			accept();
@@ -217,7 +222,7 @@ void RegistExecuteDialog::Success(RegisteredHost host)
 
 	settings->AddRegisteredHost(host);
 
-	QMessageBox::information(this, tr("Console registered"), tr("The Console %1 with ID %2 has been successfully registered!").arg(host.GetPS4Nickname(), host.GetPS4MAC().ToString()));
+	QMessageBox::information(this, tr("Console registered"), tr("The Console %1 with ID %2 has been successfully registered!").arg(host.GetServerNickname(), host.GetServerMAC().ToString()));
 
 	accept();
 }

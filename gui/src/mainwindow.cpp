@@ -167,7 +167,7 @@ MainWindow::MainWindow(Settings *settings, QWidget *parent)
 	grid_widget->setContentsMargins(0, 0, 0, 0);
 
 	resize(800, 600);
-	
+
 	connect(&discovery_manager, &DiscoveryManager::HostsUpdated, this, &MainWindow::UpdateDisplayServers);
 	connect(settings, &Settings::RegisteredHostsUpdated, this, &MainWindow::UpdateDisplayServers);
 	connect(settings, &Settings::ManualHostsUpdated, this, &MainWindow::UpdateDisplayServers);
@@ -212,7 +212,8 @@ void MainWindow::SendWakeup(const DisplayServer *server)
 
 	try
 	{
-		discovery_manager.SendWakeup(server->GetHostAddr(), server->registered_host.GetRPRegistKey());
+		discovery_manager.SendWakeup(server->GetHostAddr(), server->registered_host.GetRPRegistKey(),
+				chiaki_target_is_ps5(server->registered_host.GetTarget()));
 	}
 	catch(const Exception &e)
 	{
@@ -248,7 +249,7 @@ void MainWindow::ServerItemWidgetTriggered()
 		}
 
 		QString host = server.GetHostAddr();
-		StreamSessionConnectInfo info(settings, host, server.registered_host.GetRPRegistKey(), server.registered_host.GetRPKey(), false);
+		StreamSessionConnectInfo info(settings, server.registered_host.GetTarget(), host, server.registered_host.GetRPRegistKey(), server.registered_host.GetRPKey(), false);
 		new StreamWindow(info);
 	}
 	else
@@ -329,7 +330,7 @@ void MainWindow::UpdateDisplayServers()
 
 		display_servers.append(server);
 	}
-	
+
 	UpdateServerWidgets();
 }
 

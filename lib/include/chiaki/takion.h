@@ -26,6 +26,7 @@ extern "C" {
 
 typedef enum chiaki_takion_message_data_type_t {
 	CHIAKI_TAKION_MESSAGE_DATA_TYPE_PROTOBUF = 0,
+	CHIAKI_TAKION_MESSAGE_DATA_TYPE_RUMBLE = 7,
 	CHIAKI_TAKION_MESSAGE_DATA_TYPE_9 = 9
 } ChiakiTakionMessageDataType;
 
@@ -44,6 +45,8 @@ typedef struct chiaki_takion_av_packet_t
 	uint8_t byte_at_0x2c;
 
 	uint64_t key_pos;
+
+	uint8_t byte_before_audio_data;
 
 	uint8_t *data; // not owned
 	size_t data_size;
@@ -110,6 +113,7 @@ typedef struct chiaki_takion_connect_info_t
 typedef struct chiaki_takion_t
 {
 	ChiakiLog *log;
+	uint8_t version;
 
 	/**
 	 * Whether encryption should be used.
@@ -224,6 +228,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *
 #define CHIAKI_TAKION_V9_AV_HEADER_SIZE_AUDIO 0x12
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_v9_av_packet_parse(ChiakiTakionAVPacket *packet, ChiakiKeyState *key_state, uint8_t *buf, size_t buf_size);
+
+#define CHIAKI_TAKION_V12_AV_HEADER_SIZE_VIDEO 0x17
+#define CHIAKI_TAKION_V12_AV_HEADER_SIZE_AUDIO 0x13
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_v12_av_packet_parse(ChiakiTakionAVPacket *packet, ChiakiKeyState *key_state, uint8_t *buf, size_t buf_size);
 
 #define CHIAKI_TAKION_V7_AV_HEADER_SIZE_BASE					0x12
 #define CHIAKI_TAKION_V7_AV_HEADER_SIZE_VIDEO_ADD				0x3

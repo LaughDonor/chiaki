@@ -68,7 +68,6 @@ static QSet<QString> chiaki_motion_controller_guids({
 	"030000008f0e00001431000000000000",
 });
 
-
 static ControllerManager *instance = nullptr;
 
 #define UPDATE_INTERVAL_MS 4
@@ -252,7 +251,11 @@ QString Controller::GetName()
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return QString();
-	return SDL_GameControllerName(controller);
+	SDL_Joystick *js = SDL_GameControllerGetJoystick(controller);
+	SDL_JoystickGUID guid = SDL_JoystickGetGUID(js);
+	char guid_str[256];
+	SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
+	return QString("%1 (%2)").arg(SDL_JoystickName(js), guid_str);
 #else
 	return QString();
 #endif
@@ -290,4 +293,13 @@ ChiakiControllerState Controller::GetState()
 
 #endif
 	return state;
+}
+
+void Controller::SetRumble(uint8_t left, uint8_t right)
+{
+#ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	if(!controller)
+		return;
+	SDL_GameControllerRumble(controller, (uint16_t)left << 8, (uint16_t)right << 8, 5000);
+#endif
 }

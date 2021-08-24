@@ -4,7 +4,6 @@ int real_main(int argc, char *argv[]);
 int main(int argc, char *argv[]) { return real_main(argc, argv); }
 
 #include <streamwindow.h>
-#include <videodecoder.h>
 #include <mainwindow.h>
 #include <streamsession.h>
 #include <settings.h>
@@ -112,7 +111,7 @@ int real_main(int argc, char *argv[])
 	if(args[0] == "list")
 	{
 		for(const auto &host : settings.GetRegisteredHosts())
-		printf("Host: %s \n", host.GetPS4Nickname().toLocal8Bit().constData());
+			printf("Host: %s \n", host.GetServerNickname().toLocal8Bit().constData());
 		return 0;
 	}
 	if(args[0] == "stream")
@@ -124,6 +123,7 @@ int real_main(int argc, char *argv[])
 		QString host = args[args.size()-1];
 		QByteArray morning;
 		QByteArray regist_key;
+		ChiakiTarget target = CHIAKI_TARGET_PS4_10;
 
 		if(parser.value(regist_key_option).isEmpty() && parser.value(morning_option).isEmpty())
 		{
@@ -131,10 +131,11 @@ int real_main(int argc, char *argv[])
 				parser.showHelp(1);
 			for(const auto &temphost : settings.GetRegisteredHosts())
 			{
-				if(temphost.GetPS4Nickname() == args[1])
+				if(temphost.GetServerNickname() == args[1])
 				{
 					morning = temphost.GetRPKey();
 					regist_key = temphost.GetRPRegistKey();
+					target = temphost.GetTarget();
 					break;
 				}
 				printf("No configuration found for '%s'\n", args[1].toLocal8Bit().constData());
@@ -143,6 +144,7 @@ int real_main(int argc, char *argv[])
 		}
 		else
 		{
+			// TODO: explicit option for target
 			regist_key = parser.value(regist_key_option).toUtf8();
 			if(regist_key.length() > sizeof(ChiakiConnectInfo::regist_key))
 			{
@@ -162,7 +164,7 @@ int real_main(int argc, char *argv[])
 				return 1;
 			}
 		}
-		StreamSessionConnectInfo connect_info(&settings, host, regist_key, morning, parser.isSet(fullscreen_option));
+		StreamSessionConnectInfo connect_info(&settings, target, host, regist_key, morning, parser.isSet(fullscreen_option));
 		return RunStream(app, connect_info);
 	}
 #ifdef CHIAKI_ENABLE_CLI

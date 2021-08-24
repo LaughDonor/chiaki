@@ -68,21 +68,25 @@ void event(SetsuEvent *event, void *user)
 	switch(event->type)
 	{
 		case SETSU_EVENT_DEVICE_ADDED: {
-			SetsuDevice *dev = setsu_connect(setsu, event->path);
+			if(event->dev_type != SETSU_DEVICE_TYPE_TOUCHPAD)
+				break;
+			SetsuDevice *dev = setsu_connect(setsu, event->path, SETSU_DEVICE_TYPE_TOUCHPAD);
 			LOG("Device added: %s, connect %s\n", event->path, dev ? "succeeded" : "FAILED!");
 			break;
 		}
 		case SETSU_EVENT_DEVICE_REMOVED:
+			if(event->dev_type != SETSU_DEVICE_TYPE_TOUCHPAD)
+				break;
 			LOG("Device removed: %s\n", event->path);
 			break;
 		case SETSU_EVENT_TOUCH_DOWN:
-			LOG("Down for %s, tracking id %d\n", setsu_device_get_path(event->dev), event->tracking_id);
+			LOG("Down for %s, tracking id %d\n", setsu_device_get_path(event->dev), event->touch.tracking_id);
 			for(size_t i=0; i<TOUCHES_MAX; i++)
 			{
 				if(!touches[i].down)
 				{
 					touches[i].down = true;
-					touches[i].tracking_id = event->tracking_id;
+					touches[i].tracking_id = event->touch.tracking_id;
 					break;
 				}
 			}
@@ -90,19 +94,19 @@ void event(SetsuEvent *event, void *user)
 		case SETSU_EVENT_TOUCH_POSITION:
 		case SETSU_EVENT_TOUCH_UP:
 			if(event->type == SETSU_EVENT_TOUCH_UP)
-				LOG("Up for %s, tracking id %d\n", setsu_device_get_path(event->dev), event->tracking_id);
+				LOG("Up for %s, tracking id %d\n", setsu_device_get_path(event->dev), event->touch.tracking_id);
 			else
 				LOG("Position for %s, tracking id %d: %u, %u\n", setsu_device_get_path(event->dev),
-						event->tracking_id, (unsigned int)event->x, (unsigned int)event->y);
+						event->touch.tracking_id, (unsigned int)event->touch.x, (unsigned int)event->touch.y);
 			for(size_t i=0; i<TOUCHES_MAX; i++)
 			{
-				if(touches[i].down && touches[i].tracking_id == event->tracking_id)
+				if(touches[i].down && touches[i].tracking_id == event->touch.tracking_id)
 				{
 					switch(event->type)
 					{
 						case SETSU_EVENT_TOUCH_POSITION:
-							touches[i].x = event->x;
-							touches[i].y = event->y;
+							touches[i].x = event->touch.x;
+							touches[i].y = event->touch.y;
 							break;
 						case SETSU_EVENT_TOUCH_UP:
 							touches[i].down = false;
@@ -117,6 +121,8 @@ void event(SetsuEvent *event, void *user)
 		case SETSU_EVENT_BUTTON_UP:
 			LOG("Button for %s: %llu %s\n", setsu_device_get_path(event->dev),
 					(unsigned long long)event->button, event->type == SETSU_EVENT_BUTTON_DOWN ? "down" : "up");
+			break;
+		default:
 			break;
 	}
 }

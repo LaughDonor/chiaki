@@ -47,9 +47,9 @@ void StreamWindow::Init()
 	connect(session, &StreamSession::SessionQuit, this, &StreamWindow::SessionQuit);
 	connect(session, &StreamSession::LoginPINRequested, this, &StreamWindow::LoginPINRequested);
 
-	if(session->GetVideoDecoder())
+	if(session->GetFfmpegDecoder())
 	{
-		av_widget = new AVOpenGLWidget(session->GetVideoDecoder(), this);
+		av_widget = new AVOpenGLWidget(session, this);
 		setCentralWidget(av_widget);
 	}
 	else
@@ -113,7 +113,7 @@ void StreamWindow::closeEvent(QCloseEvent *event)
 			switch(connect_info.settings->GetDisconnectAction())
 			{
 				case DisconnectAction::Ask: {
-					auto res = QMessageBox::question(this, tr("Disconnect Session"), tr("Do you want the PS4 to go into sleep mode?"),
+					auto res = QMessageBox::question(this, tr("Disconnect Session"), tr("Do you want the Console to go into sleep mode?"),
 							QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
 					switch(res)
 					{

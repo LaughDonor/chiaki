@@ -501,7 +501,6 @@ static void ctrl_enable_optional_features(ChiakiCtrl *ctrl)
 	ctrl_message_send(ctrl, 0x36, pre_enable, 4);
 }
 
-
 static void ctrl_message_received_session_id(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)
 {
 	if(ctrl->session->ctrl_session_id_received)
@@ -652,7 +651,7 @@ static void ctrl_message_received_keyboard_close(ChiakiCtrl *ctrl, uint8_t *payl
 	chiaki_session_send_event(ctrl->session, &keyboard_event);
 }
 
-static void ctrl_message_received_keyboard_text_change(ChiakiCtrl* ctrl, uint8_t* payload, size_t payload_size)
+static void ctrl_message_received_keyboard_text_change(ChiakiCtrl *ctrl, uint8_t *payload, size_t payload_size)
 {
 	assert(payload_size >= sizeof(CtrlKeyboardTextResponseMessage));
 
@@ -676,7 +675,8 @@ static void ctrl_message_received_keyboard_text_change(ChiakiCtrl* ctrl, uint8_t
 		free(buffer);
 }
 
-typedef struct ctrl_response_t {
+typedef struct ctrl_response_t
+{
 	bool server_type_valid;
 	uint8_t rp_server_type[0x10];
 	bool success;
@@ -741,7 +741,6 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 	ChiakiErrorCode err = chiaki_socket_set_nonblock(sock, true);
 	if(err != CHIAKI_ERR_SUCCESS)
 		CHIAKI_LOGE(session->log, "Failed to set ctrl socket to non-blocking: %s", chiaki_error_string(err));
-
 
 	chiaki_mutex_unlock(&ctrl->notif_mutex);
 	err = chiaki_stop_pipe_connect(&ctrl->notif_pipe, sock, sa, addr->ai_addrlen);
@@ -813,6 +812,40 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 			goto error;
 	}
 
+	char streaming_type_b64[256];
+	bool have_streaming_type = chiaki_target_is_ps5(session->target);
+	if(have_streaming_type)
+	{
+		uint32_t streaming_type;
+		switch(session->connect_info.video_profile.codec)
+		{
+			case CHIAKI_CODEC_H265:
+				streaming_type = 2;
+				break;
+			case CHIAKI_CODEC_H265_HDR:
+				streaming_type = 3;
+				break;
+			default:
+				streaming_type = 1;
+				break;
+		}
+		uint8_t streaming_type_buf[4] = {
+			streaming_type & 0xff,
+			(streaming_type >> 8) & 0xff,
+			(streaming_type >> 0x10) & 0xff,
+			(streaming_type >> 0x18) & 0xff
+		};
+		uint8_t streaming_type_enc[4] = { 0 };
+		err = chiaki_rpcrypt_encrypt(&session->rpcrypt, ctrl->crypt_counter_local++,
+				streaming_type_buf, streaming_type_enc, 4);
+		if(err != CHIAKI_ERR_SUCCESS)
+			goto error;
+
+		err = chiaki_base64_encode(streaming_type_enc, 4, streaming_type_b64, sizeof(streaming_type_b64));
+		if(err != CHIAKI_ERR_SUCCESS)
+			goto error;
+	}
+
 	static const char request_fmt[] =
 			"GET %s HTTP/1.1\r\n"
 			"Host: %s:%d\r\n"
@@ -827,11 +860,16 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 			"RP-OSType: %s\r\n"
 			"RP-ConPath: 1\r\n"
 			"%s%s%s"
+			"%s%s%s"
 			"\r\n";
 
-	const char *path = (session->target == CHIAKI_TARGET_PS4_8 || session->target == CHIAKI_TARGET_PS4_9)
-		? "/sce/rp/session/ctrl"
-		: "/sie/ps4/rp/sess/ctrl";
+	const char *path;
+	if(session->target == CHIAKI_TARGET_PS4_8 || session->target == CHIAKI_TARGET_PS4_9)
+		path = "/sce/rp/session/ctrl";
+	else if(chiaki_target_is_ps5(session->target))
+		path = "/sie/ps5/rp/sess/ctrl";
+	else
+		path = "/sie/ps4/rp/sess/ctrl";
 	const char *rp_version = chiaki_rp_version_string(session->target);
 
 	char buf[512];
@@ -840,7 +878,10 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 			rp_version ? rp_version : "", did_b64, ostype_b64,
 			have_bitrate ? "RP-StartBitrate: " : "",
 			have_bitrate ? bitrate_b64 : "",
-			have_bitrate ? "\r\n" : "");
+			have_bitrate ? "\r\n" : "",
+			have_streaming_type ? "RP-StreamingType: " : "",
+			have_streaming_type ? streaming_type_b64 : "",
+			have_streaming_type ? "\r\n" : "");
 	if(request_len < 0 || request_len >= sizeof(buf))
 		goto error;
 
@@ -921,7 +962,32 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 		}
 	}
 
-	if(!response.server_type_valid)
+	if(response.server_type_valid)
+	{
+		uint8_t server_type = response.rp_server_type[0]; // 0 = PS4, 1 = PS4 Pro, 2 = PS5
+		CHIAKI_LOGI(session->log, "Ctrl got Server Type: %u", (unsigned int)server_type);
+		if(server_type == 0
+				&& session->connect_info.video_profile_auto_downgrade
+				&& session->connect_info.video_profile.height == 1080)
+		{
+			// regular PS4 doesn't support >= 1080p
+			CHIAKI_LOGI(session->log, "1080p was selected but server would not support it. Downgrading.");
+			chiaki_connect_video_profile_preset(
+				&session->connect_info.video_profile,
+				CHIAKI_VIDEO_RESOLUTION_PRESET_720p,
+				session->connect_info.video_profile.max_fps == 60
+					? CHIAKI_VIDEO_FPS_PRESET_60
+					: CHIAKI_VIDEO_FPS_PRESET_30);
+		}
+		if((server_type == 0 || server_type == 1)
+				&& session->connect_info.video_profile.codec != CHIAKI_CODEC_H264)
+		{
+			// PS4 doesn't support anything except h264
+			CHIAKI_LOGI(session->log, "A codec other than H264 was selected but server would not support it. Downgrading.");
+			session->connect_info.video_profile.codec = CHIAKI_CODEC_H264;
+		}
+	}
+	else
 		CHIAKI_LOGE(session->log, "No valid Server Type in ctrl response");
 
 	ctrl->sock = sock;

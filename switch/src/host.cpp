@@ -1,47 +1,47 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
-
 #include <cstring>
 
 #include <chiaki/base64.h>
 
-#include "io.h"
 #include "host.h"
+#include "io.h"
 
-
-static void InitAudioCB(unsigned int channels, unsigned int rate, void * user)
+static void InitAudioCB(unsigned int channels, unsigned int rate, void *user)
 {
-	IO * io = (IO *) user;
+	IO *io = (IO *)user;
 	io->InitAudioCB(channels, rate);
 }
 
-static bool VideoCB(uint8_t * buf, size_t buf_size, void * user)
+static bool VideoCB(uint8_t *buf, size_t buf_size, void *user)
 {
-	IO * io = (IO *) user;
+	IO *io = (IO *)user;
 	return io->VideoCB(buf, buf_size);
 }
 
-static void AudioCB(int16_t * buf, size_t samples_count, void * user)
+static void AudioCB(int16_t *buf, size_t samples_count, void *user)
 {
-	IO * io = (IO *) user;
+	IO *io = (IO *)user;
 	io->AudioCB(buf, samples_count);
 }
 
-static void EventCB(ChiakiEvent * event, void * user)
+static void EventCB(ChiakiEvent *event, void *user)
 {
-	IO * io = (IO *) user;
-	io->EventCB(event);
+	Host *host = (Host *)user;
+	host->ConnectionEventCB(event);
 }
 
-static void RegistEventCB(ChiakiRegistEvent * event, void * user)
+static void RegistEventCB(ChiakiRegistEvent *event, void *user)
 {
-	Host * host = (Host *) user;
+	Host *host = (Host *)user;
 	host->RegistCB(event);
 }
 
-Host::Host(ChiakiLog * log,  Settings * settings, std::string host_name)
-	: log(log), settings(settings), host_name(host_name)
+Host::Host(std::string host_name)
+	: host_name(host_name)
 {
+	this->settings = Settings::GetInstance();
+	this->log = settings->GetLogger();
 }
 
 Host::~Host()
@@ -55,14 +55,16 @@ int Host::Wakeup()
 		CHIAKI_LOGE(this->log, "Given registkey is too long");
 		return 1;
 	}
-	else if (strlen(this->rp_regist_key) <=0)
+	else if(strlen(this->rp_regist_key) <= 0)
 	{
 		CHIAKI_LOGE(this->log, "Given registkey is not defined");
 		return 2;
 	}
 
 	uint64_t credential = (uint64_t)strtoull(this->rp_regist_key, NULL, 16);
-	ChiakiErrorCode ret = chiaki_discovery_wakeup(this->log, NULL, host_addr.c_str(), credential);
+	ChiakiErrorCode ret = chiaki_discovery_wakeup(this->log, NULL,
+		host_addr.c_str(), credential, this->IsPS5());
+
 	if(ret == CHIAKI_ERR_SUCCESS)
 	{
 		//FIXME
@@ -70,24 +72,23 @@ int Host::Wakeup()
 	return ret;
 }
 
-int Host::Register(std::string pin)
+int Host::Register(int pin)
 {
 	// use pin and accont_id to negociate secrets for session
 	//
-	// convert psn_account_id into uint8_t[CHIAKI_PSN_ACCOUNT_ID_SIZE]
-	// CHIAKI_PSN_ACCOUNT_ID_SIZE == 8
 	std::string account_id = this->settings->GetPSNAccountID(this);
 	std::string online_id = this->settings->GetPSNOnlineID(this);
 	size_t account_id_size = sizeof(uint8_t[CHIAKI_PSN_ACCOUNT_ID_SIZE]);
 
-	// PS4 firmware > 7.0
-	if(this->system_version >= 7000000)
+	regist_info.target = this->target;
+
+	if(this->target >= CHIAKI_TARGET_PS4_9)
 	{
 		// use AccountID for ps4 > 7.0
 		if(account_id.length() > 0)
 		{
 			chiaki_base64_decode(account_id.c_str(), account_id.length(),
-					regist_info.psn_account_id, &(account_id_size));
+				regist_info.psn_account_id, &(account_id_size));
 			regist_info.psn_online_id = nullptr;
 		}
 		else
@@ -95,25 +96,20 @@ int Host::Register(std::string pin)
 			CHIAKI_LOGE(this->log, "Undefined PSN Account ID (Please configure a valid psn_account_id)");
 			return HOST_REGISTER_ERROR_SETTING_PSNACCOUNTID;
 		}
-		if(this->system_version >= 8000000)
-			regist_info.target = CHIAKI_TARGET_PS4_10;
-		else
-			regist_info.target = CHIAKI_TARGET_PS4_9;
 	}
-	else if( this->system_version < 7000000 && this->system_version > 0)
+	else if(this->target > CHIAKI_TARGET_PS4_UNKNOWN)
 	{
 		// use oline ID for ps4 < 7.0
 		if(online_id.length() > 0)
 		{
 			regist_info.psn_online_id = this->psn_online_id.c_str();
-			// regist_info.psn_account_id = {0};
+			// regist_info.psn_account_id = '\0';
 		}
 		else
 		{
 			CHIAKI_LOGE(this->log, "Undefined PSN Online ID (Please configure a valid psn_online_id)");
 			return HOST_REGISTER_ERROR_SETTING_PSNONLINEID;
 		}
-		regist_info.target = CHIAKI_TARGET_PS4_8;
 	}
 	else
 	{
@@ -121,36 +117,38 @@ int Host::Register(std::string pin)
 		throw Exception("Undefined PS4 system version (please run discover first)");
 	}
 
-	this->regist_info.pin = atoi(pin.c_str());
+	this->regist_info.pin = pin;
 	this->regist_info.host = this->host_addr.c_str();
 	this->regist_info.broadcast = false;
 
-	if(this->system_version >= 7000000)
-		CHIAKI_LOGI(this->log, "Registering to host `%s` `%s` with PSN AccountID `%s` pin `%s`",
-			this->host_name.c_str(), this->host_addr.c_str(), account_id.c_str(), pin.c_str());
+	if(this->target >= CHIAKI_TARGET_PS4_9)
+		CHIAKI_LOGI(this->log, "Registering to host `%s` `%s` with PSN AccountID `%s` pin `%d`",
+			this->host_name.c_str(), this->host_addr.c_str(), account_id.c_str(), pin);
 	else
-		CHIAKI_LOGI(this->log, "Registering to host `%s` `%s` with PSN OnlineID `%s` pin `%s`",
-			this->host_name.c_str(), this->host_addr.c_str(), online_id.c_str(), pin.c_str());
+		CHIAKI_LOGI(this->log, "Registering to host `%s` `%s` with PSN OnlineID `%s` pin `%d`",
+			this->host_name.c_str(), this->host_addr.c_str(), online_id.c_str(), pin);
 
 	chiaki_regist_start(&this->regist, this->log, &this->regist_info, RegistEventCB, this);
 	return HOST_REGISTER_OK;
 }
 
-int Host::InitSession(IO * user)
+int Host::InitSession(IO *user)
 {
 	chiaki_connect_video_profile_preset(&(this->video_profile),
-			this->video_resolution, this->video_fps);
+		this->video_resolution, this->video_fps);
 	// Build chiaki ps4 stream session
 	chiaki_opus_decoder_init(&(this->opus_decoder), this->log);
 	ChiakiAudioSink audio_sink;
-	ChiakiConnectInfo chiaki_connect_info = { 0 };
+	ChiakiConnectInfo chiaki_connect_info = {};
 
 	chiaki_connect_info.host = this->host_addr.c_str();
 	chiaki_connect_info.video_profile = this->video_profile;
+	chiaki_connect_info.video_profile_auto_downgrade = true;
+
+	chiaki_connect_info.ps5 = this->IsPS5();
+
 	memcpy(chiaki_connect_info.regist_key, this->rp_regist_key, sizeof(chiaki_connect_info.regist_key));
 	memcpy(chiaki_connect_info.morning, this->rp_key, sizeof(chiaki_connect_info.morning));
-	// set keybord state to 0
-	memset(&(this->keyboard_state), 0, sizeof(keyboard_state));
 
 	ChiakiErrorCode err = chiaki_session_init(&(this->session), &chiaki_connect_info, this->log);
 	if(err != CHIAKI_ERR_SUCCESS)
@@ -159,9 +157,13 @@ int Host::InitSession(IO * user)
 	// audio setting_cb and frame_cb
 	chiaki_opus_decoder_set_cb(&this->opus_decoder, InitAudioCB, AudioCB, user);
 	chiaki_opus_decoder_get_sink(&this->opus_decoder, &audio_sink);
-	chiaki_session_set_audio_sink(&(this->session), &audio_sink);
-	chiaki_session_set_video_sample_cb(&(this->session), VideoCB, user);
-	chiaki_session_set_event_cb(&(this->session), EventCB, user);
+	chiaki_session_set_audio_sink(&this->session, &audio_sink);
+	chiaki_session_set_video_sample_cb(&this->session, VideoCB, user);
+	chiaki_session_set_event_cb(&this->session, EventCB, this);
+
+	// init controller states
+	chiaki_controller_state_set_idle(&this->controller_state);
+
 	return 0;
 }
 
@@ -169,6 +171,7 @@ int Host::FiniSession()
 {
 	if(this->session_init)
 	{
+		this->session_init = false;
 		chiaki_session_join(&this->session);
 		chiaki_session_fini(&this->session);
 		chiaki_opus_decoder_fini(&this->opus_decoder);
@@ -191,13 +194,43 @@ void Host::StartSession()
 	}
 }
 
-void Host::SendFeedbackState(ChiakiControllerState * state)
+void Host::SendFeedbackState()
 {
 	// send controller/joystick key
-	chiaki_session_set_controller_state(&this->session, state);
+	if(this->io_read_controller_cb != nullptr)
+		this->io_read_controller_cb(&this->controller_state, &finger_id_touch_id);
+
+	chiaki_session_set_controller_state(&this->session, &this->controller_state);
 }
 
-void Host::RegistCB(ChiakiRegistEvent * event)
+void Host::ConnectionEventCB(ChiakiEvent *event)
+{
+	switch(event->type)
+	{
+		case CHIAKI_EVENT_CONNECTED:
+			CHIAKI_LOGI(this->log, "EventCB CHIAKI_EVENT_CONNECTED");
+			if(this->chiaki_event_connected_cb != nullptr)
+				this->chiaki_event_connected_cb();
+			break;
+		case CHIAKI_EVENT_LOGIN_PIN_REQUEST:
+			CHIAKI_LOGI(this->log, "EventCB CHIAKI_EVENT_LOGIN_PIN_REQUEST");
+			if(this->chiaki_even_login_pin_request_cb != nullptr)
+				this->chiaki_even_login_pin_request_cb(event->login_pin_request.pin_incorrect);
+			break;
+		case CHIAKI_EVENT_RUMBLE:
+			CHIAKI_LOGD(this->log, "EventCB CHIAKI_EVENT_RUMBLE");
+			if(this->chiaki_event_rumble_cb != nullptr)
+				this->chiaki_event_rumble_cb(event->rumble.left, event->rumble.right);
+			break;
+		case CHIAKI_EVENT_QUIT:
+			CHIAKI_LOGI(this->log, "EventCB CHIAKI_EVENT_QUIT");
+			if(this->chiaki_event_quit_cb != nullptr)
+				this->chiaki_event_quit_cb(&event->quit);
+			break;
+	}
+}
+
+void Host::RegistCB(ChiakiRegistEvent *event)
 {
 	// Chiaki callback fuction
 	// fuction called by lib chiaki regist
@@ -223,35 +256,35 @@ void Host::RegistCB(ChiakiRegistEvent * event)
 			}
 			break;
 		case CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS:
-			{
-				ChiakiRegisteredHost *r_host = event->registered_host;
-				CHIAKI_LOGI(this->log, "Register event CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS");
-				// copy values form ChiakiRegisteredHost object
-				this->ap_ssid = r_host->ap_ssid;
-				this->ap_key = r_host->ap_key;
-				this->ap_name = r_host->ap_name;
-				memcpy( &(this->ps4_mac), &(r_host->ps4_mac), sizeof(this->ps4_mac) );
-				this->ps4_nickname = r_host->ps4_nickname;
-				memcpy( &(this->rp_regist_key),  &(r_host->rp_regist_key), sizeof(this->rp_regist_key) );
-				this->rp_key_type = r_host->rp_key_type;
-				memcpy( &(this->rp_key), &(r_host->rp_key), sizeof(this->rp_key) );
-				// mark host as registered
-				this->registered = true;
-				this->rp_key_data = true;
-				CHIAKI_LOGI(this->log, "Register Success %s", this->host_name.c_str());
+		{
+			ChiakiRegisteredHost *r_host = event->registered_host;
+			CHIAKI_LOGI(this->log, "Register event CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS");
+			// copy values form ChiakiRegisteredHost object
+			this->ap_ssid = r_host->ap_ssid;
+			this->ap_key = r_host->ap_key;
+			this->ap_name = r_host->ap_name;
+			memcpy(&(this->server_mac), &(r_host->server_mac), sizeof(this->server_mac));
+			this->server_nickname = r_host->server_nickname;
+			memcpy(&(this->rp_regist_key), &(r_host->rp_regist_key), sizeof(this->rp_regist_key));
+			this->rp_key_type = r_host->rp_key_type;
+			memcpy(&(this->rp_key), &(r_host->rp_key), sizeof(this->rp_key));
+			// mark host as registered
+			this->registered = true;
+			this->rp_key_data = true;
+			CHIAKI_LOGI(this->log, "Register Success %s", this->host_name.c_str());
 
-				if(this->chiaki_regist_event_type_finished_success != nullptr)
-					this->chiaki_regist_event_type_finished_success();
+			if(this->chiaki_regist_event_type_finished_success != nullptr)
+				this->chiaki_regist_event_type_finished_success();
 
-				break;
-			}
+			break;
+		}
 	}
 	// close registration socket
 	chiaki_regist_stop(&this->regist);
 	chiaki_regist_fini(&this->regist);
 }
 
-bool Host::GetVideoResolution(int * ret_width, int * ret_height)
+bool Host::GetVideoResolution(int *ret_width, int *ret_height)
 {
 	switch(this->video_resolution)
 	{
@@ -277,3 +310,95 @@ bool Host::GetVideoResolution(int * ret_width, int * ret_height)
 	return true;
 }
 
+std::string Host::GetHostName()
+{
+	return this->host_name;
+}
+
+std::string Host::GetHostAddr()
+{
+	return this->host_addr;
+}
+
+ChiakiTarget Host::GetChiakiTarget()
+{
+	return this->target;
+}
+
+void Host::SetChiakiTarget(ChiakiTarget target)
+{
+	this->target = target;
+}
+
+void Host::SetHostAddr(std::string host_addr)
+{
+	this->host_addr = host_addr;
+}
+
+void Host::SetRegistEventTypeFinishedCanceled(std::function<void()> chiaki_regist_event_type_finished_canceled)
+{
+	this->chiaki_regist_event_type_finished_canceled = chiaki_regist_event_type_finished_canceled;
+}
+
+void Host::SetRegistEventTypeFinishedFailed(std::function<void()> chiaki_regist_event_type_finished_failed)
+{
+	this->chiaki_regist_event_type_finished_failed = chiaki_regist_event_type_finished_failed;
+}
+
+void Host::SetRegistEventTypeFinishedSuccess(std::function<void()> chiaki_regist_event_type_finished_success)
+{
+	this->chiaki_regist_event_type_finished_success = chiaki_regist_event_type_finished_success;
+}
+
+void Host::SetEventConnectedCallback(std::function<void()> chiaki_event_connected_cb)
+{
+	this->chiaki_event_connected_cb = chiaki_event_connected_cb;
+}
+
+void Host::SetEventLoginPinRequestCallback(std::function<void(bool)> chiaki_even_login_pin_request_cb)
+{
+	this->chiaki_even_login_pin_request_cb = chiaki_even_login_pin_request_cb;
+}
+
+void Host::SetEventQuitCallback(std::function<void(ChiakiQuitEvent *)> chiaki_event_quit_cb)
+{
+	this->chiaki_event_quit_cb = chiaki_event_quit_cb;
+}
+
+void Host::SetEventRumbleCallback(std::function<void(uint8_t, uint8_t)> chiaki_event_rumble_cb)
+{
+	this->chiaki_event_rumble_cb = chiaki_event_rumble_cb;
+}
+
+void Host::SetReadControllerCallback(std::function<void(ChiakiControllerState *, std::map<uint32_t, int8_t> *)> io_read_controller_cb)
+{
+	this->io_read_controller_cb = io_read_controller_cb;
+}
+
+bool Host::IsRegistered()
+{
+	return this->registered;
+}
+
+bool Host::IsDiscovered()
+{
+	return this->discovered;
+}
+
+bool Host::IsReady()
+{
+	return this->state == CHIAKI_DISCOVERY_HOST_STATE_READY;
+}
+
+bool Host::HasRPkey()
+{
+	return this->rp_key_data;
+}
+
+bool Host::IsPS5()
+{
+	if(this->target >= CHIAKI_TARGET_PS5_UNKNOWN)
+		return true;
+	else
+		return false;
+}

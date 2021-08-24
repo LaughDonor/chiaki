@@ -35,7 +35,7 @@ CHIAKI_EXPORT const char *chiaki_rp_application_reason_string(uint32_t reason);
  */
 CHIAKI_EXPORT const char *chiaki_rp_version_string(ChiakiTarget target);
 
-CHIAKI_EXPORT ChiakiTarget chiaki_rp_version_parse(const char *rp_version_str);
+CHIAKI_EXPORT ChiakiTarget chiaki_rp_version_parse(const char *rp_version_str, bool is_ps5);
 
 
 #define CHIAKI_RP_DID_SIZE 32
@@ -48,6 +48,7 @@ typedef struct chiaki_connect_video_profile_t
 	unsigned int height;
 	unsigned int max_fps;
 	unsigned int bitrate;
+	ChiakiCodec codec;
 } ChiakiConnectVideoProfile;
 
 typedef enum {
@@ -70,10 +71,12 @@ CHIAKI_EXPORT void chiaki_connect_video_profile_preset(ChiakiConnectVideoProfile
 
 typedef struct chiaki_connect_info_t
 {
+	bool ps5;
 	const char *host; // null terminated
 	char regist_key[CHIAKI_SESSION_AUTH_SIZE]; // must be completely filled (pad with \0)
 	uint8_t morning[0x10];
 	ChiakiConnectVideoProfile video_profile;
+	bool video_profile_auto_downgrade; // Downgrade video_profile if server does not seem to support it.
 	bool enable_keyboard;
 } ChiakiConnectInfo;
 
@@ -111,6 +114,12 @@ typedef struct chiaki_audio_stream_info_event_t
 	ChiakiAudioHeader audio_header;
 } ChiakiAudioStreamInfoEvent;
 
+typedef struct chiaki_rumble_event_t
+{
+	uint8_t unknown;
+	uint8_t left; // low-frequency
+	uint8_t right; // high-frequency
+} ChiakiRumbleEvent;
 
 typedef enum {
 	CHIAKI_EVENT_CONNECTED,
@@ -118,6 +127,7 @@ typedef enum {
 	CHIAKI_EVENT_KEYBOARD_OPEN,
 	CHIAKI_EVENT_KEYBOARD_TEXT_CHANGE,
 	CHIAKI_EVENT_KEYBOARD_REMOTE_CLOSE,
+	CHIAKI_EVENT_RUMBLE,
 	CHIAKI_EVENT_QUIT,
 } ChiakiEventType;
 
@@ -128,6 +138,7 @@ typedef struct chiaki_event_t
 	{
 		ChiakiQuitEvent quit;
 		ChiakiKeyboardEvent keyboard;
+		ChiakiRumbleEvent rumble;
 		struct
 		{
 			bool pin_incorrect; // false on first request, true if the pin entered before was incorrect
@@ -149,13 +160,15 @@ typedef struct chiaki_session_t
 {
 	struct
 	{
+		bool ps5;
 		struct addrinfo *host_addrinfos;
 		struct addrinfo *host_addrinfo_selected;
-		char hostname[128];
+		char hostname[256];
 		char regist_key[CHIAKI_RPCRYPT_KEY_SIZE];
 		uint8_t morning[CHIAKI_RPCRYPT_KEY_SIZE];
 		uint8_t did[CHIAKI_RP_DID_SIZE];
 		ChiakiConnectVideoProfile video_profile;
+		bool video_profile_auto_downgrade;
 		bool enable_keyboard;
 	} connect_info;
 
